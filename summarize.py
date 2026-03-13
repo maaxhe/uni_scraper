@@ -3,10 +3,13 @@ Summarizer: liest heruntergeladene Stud.IP-Dateien, erstellt pro Kurs eine
 einzige Zusammenfassungs-Markdown-Datei mit Trainingsfragen via Claude API.
 
 Usage:
-    python summarize.py                        # alle Kurse (max 3 Dateien pro Kurs)
-    python summarize.py --course italienisch   # Kurs per Teilname angeben
+    python summarize.py                                     # alle Kurse
+    python summarize.py --course italienisch                # Kurs per Teilname
+    python summarize.py --dir /abs/path/to/course          # direkter Pfad (Dashboard nutzt das)
     python summarize.py --course italienisch --limit 5
-    python summarize.py --course italienisch --force   # neu generieren
+    python summarize.py --course italienisch --force        # neu generieren
+    python summarize.py --lang en                          # Englisch (Standard)
+    python summarize.py --lang de                          # Deutsch
 """
 
 import argparse
@@ -23,7 +26,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 COURSES_DIR = Path("/Users/maxmacbookpro/Documents/Uni/Cognitive Science [Course]/Courses")
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
+SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".pptx"}
 MAX_CHARS = 10_000
 MODEL = "claude-opus-4-6"
 OUTPUT_FILENAME = "_zusammenfassung.md"
@@ -51,6 +54,15 @@ def extract_text(path: Path) -> str:
             return "\n".join(p.text for p in doc.paragraphs)
         elif suffix in {".txt", ".md"}:
             return path.read_text(encoding="utf-8", errors="replace")
+        elif suffix == ".pptx":
+            from pptx import Presentation
+            prs = Presentation(str(path))
+            parts = []
+            for i, slide in enumerate(prs.slides, 1):
+                texts = [shape.text.strip() for shape in slide.shapes if hasattr(shape, "text") and shape.text.strip()]
+                if texts:
+                    parts.append(f"[Slide {i}]\n" + "\n".join(texts))
+            return "\n\n".join(parts)
     except Exception as exc:
         log.warning("Konnte Text nicht lesen aus %s: %s", path.name, exc)
     return ""
@@ -60,55 +72,77 @@ def extract_text(path: Path) -> str:
 # Claude API
 # ---------------------------------------------------------------------------
 
-def summarize_files(client: anthropic.Anthropic, course_name: str, files: list[dict]) -> str:
-    """
-    Sends multiple file contents to Claude and gets back one combined
-    Markdown document with summaries and training questions per file.
-    """
+PROMPTS = {
+    "en": {
+        "intro": "You are a study assistant for university students.\n\nCourse: {course_name}\n\nI'm giving you {n} file(s) from this course. Create a structured study guide in English.",
+        "section": "## [Filename]",
+        "summary_label": "**Summary** (3-5 sentences)",
+        "concepts_label": "**Key Concepts**",
+        "questions_label": "**Training Questions**",
+        "answers_label": "**Answers**",
+        "followup_label": "**Further Topics**",
+        "header": "# Summary: {name}\n\n*Generated on {date}*  \n*{n} of {total} file(s) summarised*\n\n---\n\n",
+        "truncated": "\n\n[... text truncated ...]",
+        "file_label": "### File {i}: {name}",
+    },
+    "de": {
+        "intro": "Du bist ein Lernassistent für Studierende.\n\nKurs: {course_name}\n\nIch gebe dir {n} Datei(en) aus diesem Kurs. Erstelle daraus ein strukturiertes Lernheft auf Deutsch.",
+        "section": "## [Dateiname]",
+        "summary_label": "**Zusammenfassung** (3-5 Sätze)",
+        "concepts_label": "**Kernkonzepte**",
+        "questions_label": "**Trainingsfragen**",
+        "answers_label": "**Antworten**",
+        "followup_label": "**Weiterführende Themen**",
+        "header": "# Zusammenfassung: {name}\n\n*Generiert am {date}*  \n*{n} von {total} Datei(en) zusammengefasst*\n\n---\n\n",
+        "truncated": "\n\n[... Text gekürzt ...]",
+        "file_label": "### Datei {i}: {name}",
+    },
+}
+
+
+def summarize_files(client: anthropic.Anthropic, course_name: str, files: list[dict], lang: str = "en") -> str:
+    p = PROMPTS.get(lang, PROMPTS["en"])
+
     files_block = ""
     for i, f in enumerate(files, 1):
         text = f["text"][:MAX_CHARS]
         if len(f["text"]) > MAX_CHARS:
-            text += "\n\n[... Text gekürzt ...]"
-        files_block += f"\n\n### Datei {i}: {f['name']}\n\n{text}"
+            text += p["truncated"]
+        files_block += f"\n\n{p['file_label'].format(i=i, name=f['name'])}\n\n{text}"
 
-    prompt = f"""Du bist ein Lernassistent für Studierende der Cognitive Science an der Universität Osnabrück.
+    prompt = f"""{p['intro'].format(course_name=course_name, n=len(files))}
 
-Kurs: {course_name}
+For each file create a section:
 
-Ich gebe dir {len(files)} Datei(en) aus diesem Kurs. Erstelle daraus ein strukturiertes Lernheft auf Deutsch.
+{p['section']}
 
-Für jede Datei einen eigenen Abschnitt mit:
+{p['summary_label']}
 
-## [Dateiname]
-
-**Zusammenfassung** (3-5 Sätze)
-
-**Kernkonzepte**
-- Konzept 1: kurze Erklärung
-- Konzept 2: kurze Erklärung
+{p['concepts_label']}
+- Concept 1: short explanation
+- Concept 2: short explanation
 - ...
 
-**Trainingsfragen**
-1. Frage?
-2. Frage?
-3. Frage?
-4. Frage?
-5. Frage?
+{p['questions_label']}
+1. Question?
+2. Question?
+3. Question?
+4. Question?
+5. Question?
 
-**Antworten**
-1. Antwort
-2. Antwort
+{p['answers_label']}
+1. Answer
+2. Answer
 ...
 
-**Weiterführende Themen**
-- Thema 1 — warum interessant
-- Thema 2 — warum interessant
-- Thema 3 — warum interessant
+{p['followup_label']}
+- Topic 1 — why interesting
+- Topic 2 — why interesting
+- Topic 3 — why interesting
 
 ---
 
-Hier die Dateien:{files_block}"""
+Files:{files_block}"""
 
     response = client.messages.create(
         model=MODEL,
@@ -123,26 +157,37 @@ Hier die Dateien:{files_block}"""
 # ---------------------------------------------------------------------------
 
 def find_course(name_query: str) -> Path | None:
-    """Find a course folder by partial case-insensitive name match."""
+    """Find a course folder by partial case-insensitive name match (recursive 2 levels)."""
     query = name_query.lower()
-    matches = [d for d in COURSES_DIR.iterdir() if d.is_dir() and query in d.name.lower()]
-    if not matches:
-        return None
-    if len(matches) > 1:
-        log.warning("Mehrere Treffer für '%s': %s", name_query, [m.name for m in matches])
-        log.warning("Nehme den ersten: %s", matches[0].name)
-    return matches[0]
+    # First try top-level
+    for d in COURSES_DIR.iterdir():
+        if d.is_dir() and query in d.name.lower():
+            return d
+    # Then try one level deeper (groups)
+    for group in COURSES_DIR.iterdir():
+        if not group.is_dir():
+            continue
+        for d in group.iterdir():
+            if d.is_dir() and query in d.name.lower():
+                return d
+    return None
 
 
-def process_course(client: anthropic.Anthropic, course_dir: Path, limit: int, force: bool, only_files: list[str] | None = None) -> None:
+def process_course(
+    client: anthropic.Anthropic,
+    course_dir: Path,
+    limit: int,
+    force: bool,
+    only_files: list[str] | None = None,
+    lang: str = "en",
+) -> None:
     output_path = course_dir / OUTPUT_FILENAME
 
     if output_path.exists() and not force:
-        log.info("  ✓ Zusammenfassung existiert bereits: %s", output_path)
-        log.info("  Nutze --force um neu zu generieren.")
+        log.info("  ✓ Summary already exists: %s", output_path)
+        log.info("  Use --force to regenerate.")
         return
 
-    # Collect files, skip existing summary files
     all_files = [
         f for f in course_dir.rglob("*")
         if f.is_file()
@@ -152,21 +197,18 @@ def process_course(client: anthropic.Anthropic, course_dir: Path, limit: int, fo
     ]
 
     if not all_files:
-        log.info("  Keine Dateien gefunden.")
+        log.info("  No files found.")
         return
 
-    # Filter to specific files if requested
     if only_files:
         all_files = [f for f in all_files if f.name in only_files]
 
-    # Apply limit
     files_to_process = all_files[:limit]
     if len(all_files) > limit:
-        log.info("  %d Datei(en) gefunden, verarbeite %d (--limit %d)", len(all_files), limit, limit)
+        log.info("  %d file(s) found, processing %d (--limit %d)", len(all_files), limit, limit)
     else:
-        log.info("  %d Datei(en) gefunden", len(all_files))
+        log.info("  %d file(s) found", len(all_files))
 
-    # Extract text
     file_contents = []
     for f in files_to_process:
         text = extract_text(f)
@@ -174,25 +216,26 @@ def process_course(client: anthropic.Anthropic, course_dir: Path, limit: int, fo
             file_contents.append({"name": f.name, "text": text})
             log.info("  ✎ %s", f.name)
         else:
-            log.warning("  Kein Text: %s — übersprungen", f.name)
+            log.warning("  No text: %s — skipped", f.name)
 
     if not file_contents:
-        log.warning("  Keine lesbaren Dateien.")
+        log.warning("  No readable files.")
         return
 
-    log.info("  → Sende %d Datei(en) an Claude…", len(file_contents))
+    log.info("  → Sending %d file(s) to Claude…", len(file_contents))
     try:
-        summary = summarize_files(client, course_dir.name, file_contents)
-        header = (
-            f"# Zusammenfassung: {course_dir.name}\n\n"
-            f"*Generiert am {__import__('datetime').date.today()}*  \n"
-            f"*{len(file_contents)} von {len(all_files)} Datei(en) zusammengefasst*\n\n"
-            f"---\n\n"
+        summary = summarize_files(client, course_dir.name, file_contents, lang=lang)
+        p = PROMPTS.get(lang, PROMPTS["en"])
+        header = p["header"].format(
+            name=course_dir.name,
+            date=__import__("datetime").date.today(),
+            n=len(file_contents),
+            total=len(all_files),
         )
         output_path.write_text(header + summary, encoding="utf-8")
-        log.info("  ✓ Gespeichert: %s", output_path)
+        log.info("  ✓ Saved: %s", output_path)
     except Exception as exc:
-        log.error("  Fehler: %s", exc)
+        log.error("  Error: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -200,38 +243,43 @@ def process_course(client: anthropic.Anthropic, course_dir: Path, limit: int, fo
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Stud.IP Kurs-Zusammenfasser")
-    parser.add_argument("--course", metavar="NAME", help="Kurs per Teilname angeben (z.B. 'italienisch')")
-    parser.add_argument("--limit", type=int, default=3, help="Max. Dateien pro Kurs (Standard: 3)")
-    parser.add_argument("--force", action="store_true", help="Bestehende Zusammenfassung überschreiben")
-    parser.add_argument("--files", nargs="+", metavar="FILE", help="Nur diese Dateien zusammenfassen")
+    parser = argparse.ArgumentParser(description="Stud.IP Course Summarizer")
+    parser.add_argument("--course", metavar="NAME", help="Course name (partial match)")
+    parser.add_argument("--dir", metavar="PATH", help="Absolute path to course directory (overrides --course)")
+    parser.add_argument("--limit", type=int, default=3, help="Max files per course (default: 3)")
+    parser.add_argument("--force", action="store_true", help="Overwrite existing summary")
+    parser.add_argument("--files", nargs="+", metavar="FILE", help="Only summarise these files")
+    parser.add_argument("--lang", default="en", choices=["en", "de"], help="Summary language (default: en)")
     args = parser.parse_args()
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        log.error("ANTHROPIC_API_KEY fehlt in der .env Datei")
+        log.error("ANTHROPIC_API_KEY missing in .env")
         sys.exit(1)
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    if args.course:
+    if args.dir:
+        course_dir = Path(args.dir)
+        if not course_dir.is_dir():
+            log.error("Directory not found: %s", args.dir)
+            sys.exit(1)
+        log.info("── Course: %s", course_dir.name)
+        process_course(client, course_dir, args.limit, args.force, only_files=args.files, lang=args.lang)
+    elif args.course:
         course_dir = find_course(args.course)
         if not course_dir:
-            log.error("Kein Kurs gefunden für: '%s'", args.course)
-            log.info("Verfügbare Kurse:")
-            for d in sorted(COURSES_DIR.iterdir()):
-                if d.is_dir():
-                    log.info("  %s", d.name)
+            log.error("No course found for: '%s'", args.course)
             sys.exit(1)
-        log.info("── Kurs: %s", course_dir.name)
-        process_course(client, course_dir, args.limit, args.force, only_files=args.files)
+        log.info("── Course: %s", course_dir.name)
+        process_course(client, course_dir, args.limit, args.force, only_files=args.files, lang=args.lang)
     else:
         for course_dir in sorted(COURSES_DIR.iterdir()):
             if course_dir.is_dir():
-                log.info("── Kurs: %s", course_dir.name)
-                process_course(client, course_dir, args.limit, args.force)
+                log.info("── Course: %s", course_dir.name)
+                process_course(client, course_dir, args.limit, args.force, lang=args.lang)
 
-    log.info("Fertig.")
+    log.info("Done.")
 
 
 if __name__ == "__main__":
