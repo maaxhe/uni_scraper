@@ -225,13 +225,14 @@ async def download_course_files(page: Page, course: dict, output_root: Path) -> 
         log.warning("  Could not extract course ID from URL: %s", course["url"])
         return
     cid = match.group(1)
+    log.info("  cid: %s", cid)
 
     # Use the browser context's request object so API calls share the session cookies
     api = page.context.request
 
     folder_id = await _get_top_folder_id(api, cid)
     if not folder_id:
-        log.info("  No files folder found (course may have no Dateien tab).")
+        log.warning("  No files folder found for %s (cid=%s)", course["name"], cid)
         return
 
     await _api_download_folder(api, dest_dir, folder_id)
@@ -295,10 +296,23 @@ async def _get_top_folder_id(api, cid: str) -> str | None:
     """Fetch the root folder ID for a course via the Stud.IP API."""
     resp = await api.get(f"{STUDIP_BASE}/api.php/course/{cid}/top_folder")
     if resp.status != 200:
-        log.warning("Could not fetch top_folder for course %s (HTTP %d)", cid, resp.status)
+        log.warning("  top_folder HTTP %d for cid=%s — trying /folders fallback", resp.status, cid)
+        # Fallback: list all folders for the course
+        resp2 = await api.get(f"{STUDIP_BASE}/api.php/course/{cid}/folders")
+        if resp2.status == 200:
+            data2 = await resp2.json()
+            folders = data2 if isinstance(data2, list) else data2.get("collection", [])
+            if folders:
+                fid = folders[0].get("id") or folders[0].get("folder_id")
+                log.info("  Fallback folder id: %s", fid)
+                return fid
+        log.warning("  No folder found for cid=%s", cid)
         return None
     data = await resp.json()
-    return data.get("id") or data.get("folder_id")
+    fid = data.get("id") or data.get("folder_id")
+    if not fid:
+        log.warning("  top_folder response has no id field: %s", str(data)[:200])
+    return fid
 
 
 # ---------------------------------------------------------------------------

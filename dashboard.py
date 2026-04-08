@@ -870,6 +870,19 @@ body {
   padding: 0 4px;
 }
 
+/* ── Course title bar ── */
+#course-title-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 20px 6px;
+  background: var(--bg2); border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+#course-title-text {
+  font-size: 15px; font-weight: 700; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 1;
+}
+
 /* ── Content ── */
 #content { flex: 1; overflow: hidden; position: relative; }
 
@@ -1386,6 +1399,12 @@ body {
   <!-- Main -->
   <div id="main">
 
+    <!-- Course title bar (hidden on home) -->
+    <div id="course-title-bar" style="display:none">
+      <span id="course-title-text"></span>
+      <button onclick="goHome()" title="Zurück zur Übersicht (Esc)" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:12px;padding:2px 6px;border-radius:5px;flex-shrink:0">✕</button>
+    </div>
+
     <!-- Tabs (hidden on home) -->
     <div id="tabs" style="display:none">
       <button class="tab active" data-tab="files"   onclick="switchTab('files')">📁 Dateien</button>
@@ -1395,7 +1414,6 @@ body {
       <button class="tab"        data-tab="chat"    onclick="switchTab('chat')">💬 Fragen</button>
       <div class="tab-spacer"></div>
       <span id="tab-spinner" style="display:none" class="spin"></span>
-      <span id="tabs-course-label"></span>
     </div>
 
     <!-- Content panels -->
@@ -1898,6 +1916,7 @@ function buildRecommendations(courses) {
 function goHome() {
   activeCourse = null;
   document.getElementById('tabs').style.display = 'none';
+  document.getElementById('course-title-bar').style.display = 'none';
   showPanel('home');
   filterAndRenderSidebar();
 }
@@ -1909,9 +1928,8 @@ async function selectCourse(path) {
   activeCourse = path;
   filterAndRenderSidebar();
   document.getElementById('tabs').style.display = 'flex';
-  // Show only the leaf course name (after last /)
-  const displayName = path.split('/').pop();
-  document.getElementById('tabs-course-label').textContent = displayName;
+  document.getElementById('course-title-bar').style.display = 'flex';
+  document.getElementById('course-title-text').textContent = path.split('/').pop();
   switchTab('files');
   loadFiles();
 }
@@ -2412,6 +2430,7 @@ async function startGlobalLearn() {
 
   activeCourse = null;
   document.getElementById('tabs').style.display = 'none';
+  document.getElementById('course-title-bar').style.display = 'none';
   filterAndRenderSidebar();
   showPanel('learn');
   startTimer();
