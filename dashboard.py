@@ -874,7 +874,16 @@ body {
   color: var(--text2); line-height: 1.75; white-space: pre-wrap; word-break: break-word;
 }
 .preview-body.pdf-wrap { padding: 0; position: relative; overflow: hidden; }
-.preview-body.pdf-wrap iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: none; }
+.preview-body.pdf-wrap iframe {
+  position: absolute; inset: 0; width: 100%; height: 100%; border: none;
+  transition: opacity .15s ease;
+}
+/* Transparent overlay for intercepting Ctrl+scroll wheel events */
+#pdf-wheel-overlay {
+  position: absolute; inset: 0; z-index: 2;
+  background: transparent; cursor: zoom-in;
+  display: none;
+}
 /* Block iframe mouse events while a resize is in progress */
 iframe.no-pointer { pointer-events: none; }
 
@@ -1939,18 +1948,14 @@ async function previewFile(filename) {
     pdfZoom = 'page-width';
     _pdfBaseSrc = `/api/file-raw/${enc(activeCourse)}/${enc(filename)}`;
     body.className = 'preview-body pdf-wrap';
-    // iframe fills container via CSS (position:absolute;inset:0)
-    // #zoom=page-width tells the PDF viewer to fit the page to the iframe width
-    body.innerHTML = `<iframe id="pdf-iframe" src="${_pdfSrcWithZoom('page-width')}"></iframe>`;
-    // On resize: reload after dragging stops (500ms debounce) to refit at new size
+    body.innerHTML = `<iframe id="pdf-iframe" src="${_pdfSrc('page-width')}"></iframe>`;
+    _setupPdfWheelZoom(body);
+    // Resize: reload with page-width after resize stops (auto mode only)
     if (_pdfRO) _pdfRO.disconnect();
     _pdfRO = new ResizeObserver(() => {
-      if (pdfZoom !== 'page-width') return; // only refit when in auto mode
+      if (pdfZoom !== 'page-width') return;
       clearTimeout(_pdfROTimer);
-      _pdfROTimer = setTimeout(() => {
-        const iframe = document.getElementById('pdf-iframe');
-        if (iframe) iframe.src = _pdfSrcWithZoom('page-width');
-      }, 500);
+      _pdfROTimer = setTimeout(applyPdfZoom, 500);
     });
     _pdfRO.observe(body);
   } else {
@@ -1959,29 +1964,57 @@ async function previewFile(filename) {
   }
 }
 
-let pdfZoom = 'page-width';  // 'page-width' or integer percent
+let pdfZoom = 'page-width';  // 'page-width' | integer percent
 let _pdfBaseSrc = '';
-let _pdfRO = null;
-let _pdfROTimer = null;
+let _pdfRO = null, _pdfROTimer = null;
 
-function _pdfSrcWithZoom(z) {
-  return `${_pdfBaseSrc}#zoom=${z}`;
-}
+function _pdfSrc(z) { return `${_pdfBaseSrc}#zoom=${z}`; }
 
 function applyPdfZoom() {
   const iframe = document.getElementById('pdf-iframe');
   if (!iframe) return;
-  // Reload the iframe with the chosen zoom — browser PDF viewer renders natively at that zoom.
-  iframe.src = _pdfSrcWithZoom(pdfZoom);
+  // Fade out → reload at new zoom → fade in (hides the reload flicker)
+  iframe.style.opacity = '0';
+  iframe.src = _pdfSrc(pdfZoom);
+  iframe.onload = () => { iframe.style.opacity = '1'; };
   const label = document.getElementById('zoom-label');
   if (label) label.textContent = pdfZoom === 'page-width' ? 'Auto' : pdfZoom + '%';
 }
 
 function changePdfZoom(delta) {
-  // First click from 'auto': snap to 100 then apply delta
   if (pdfZoom === 'page-width') pdfZoom = 100;
   pdfZoom = Math.min(300, Math.max(25, pdfZoom + delta));
   applyPdfZoom();
+}
+
+// ── Ctrl + scroll wheel zoom ──────────────────────────────────────────────
+// A transparent overlay intercepts wheel events (iframe swallows them normally).
+function _setupPdfWheelZoom(body) {
+  // Create or reuse overlay
+  let ov = document.getElementById('pdf-wheel-overlay');
+  if (!ov) {
+    ov = document.createElement('div');
+    ov.id = 'pdf-wheel-overlay';
+    body.appendChild(ov);
+  } else {
+    body.appendChild(ov); // move into current body
+  }
+
+  ov.addEventListener('wheel', e => {
+    e.preventDefault();
+    changePdfZoom(e.deltaY < 0 ? 25 : -25);
+  }, { passive: false });
+
+  // Show overlay only while Ctrl/Cmd is held
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && document.getElementById('pdf-iframe')) {
+      ov.style.display = 'block';
+      ov.style.cursor = 'zoom-in';
+    }
+  });
+  document.addEventListener('keyup', e => {
+    if (!e.ctrlKey && !e.metaKey) ov.style.display = 'none';
+  });
 }
 
 function togglePreviewFullscreen() {
