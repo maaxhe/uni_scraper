@@ -876,7 +876,6 @@ body {
 .preview-body.pdf-wrap { padding: 0; position: relative; overflow: hidden; }
 .preview-body.pdf-wrap iframe {
   position: absolute; inset: 0; width: 100%; height: 100%; border: none;
-  transition: opacity .15s ease;
 }
 /* Transparent overlay for intercepting Ctrl+scroll wheel events */
 #pdf-wheel-overlay {
@@ -1973,10 +1972,7 @@ function _pdfSrc(z) { return `${_pdfBaseSrc}#zoom=${z}`; }
 function applyPdfZoom() {
   const iframe = document.getElementById('pdf-iframe');
   if (!iframe) return;
-  // Fade out → reload at new zoom → fade in (hides the reload flicker)
-  iframe.style.opacity = '0';
   iframe.src = _pdfSrc(pdfZoom);
-  iframe.onload = () => { iframe.style.opacity = '1'; };
   const label = document.getElementById('zoom-label');
   if (label) label.textContent = pdfZoom === 'page-width' ? 'Auto' : pdfZoom + '%';
 }
