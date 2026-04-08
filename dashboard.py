@@ -552,6 +552,22 @@ body {
 #search-global:focus { border-color: var(--blue); box-shadow: var(--glow-blue); }
 #search-global::placeholder { color: var(--text3); }
 
+/* ── Topbar responsiveness ── */
+@media (max-width: 980px) {
+  #topbar { gap: 8px; padding: 0 12px; }
+  #search-global { max-width: 240px; }
+}
+@media (max-width: 780px) {
+  .logo-wordmark { display: none; }
+  #search-global { max-width: none; flex: 1; }
+}
+@media (max-width: 600px) {
+  .tbtn-label { display: none; }
+  .topbar-shortcuts { display: none; }
+  .tbtn { padding: 7px 10px; }
+  #search-global { font-size: 12px; padding: 7px 10px 7px 30px; }
+}
+
 .tbtn {
   padding: 7px 15px;
   border-radius: var(--radius);
@@ -1222,11 +1238,11 @@ body {
 <!-- Topbar -->
 <div id="topbar">
   <button id="sidebar-toggle" onclick="toggleSidebar()" title="Kursliste ein-/ausblenden (B)">☰</button>
-  <div id="topbar-logo"><span class="logo-icon">📚</span> <span>Stud.IP</span> Dashboard</div>
+  <div id="topbar-logo"><span class="logo-icon">📚</span><span class="logo-wordmark"> <span>Stud.IP</span> Dashboard</span></div>
   <input id="search-global" type="text" placeholder="🔍  Suche in allen Zusammenfassungen… (Ctrl+K)" oninput="handleGlobalSearch(event)">
-  <button class="tbtn btn-gray" onclick="goHome()" title="Übersicht (Esc)">Übersicht</button>
-  <button class="tbtn btn-gray" onclick="showShortcuts()" title="Tastenkürzel anzeigen (?)">⌨️</button>
-  <button class="tbtn btn-blue" id="scrape-btn" onclick="runScraper()">↓ Neue Dateien</button>
+  <button class="tbtn btn-gray topbar-home" onclick="goHome()" title="Übersicht (Esc)"><span class="tbtn-label">Übersicht</span></button>
+  <button class="tbtn btn-gray topbar-shortcuts" onclick="showShortcuts()" title="Tastenkürzel anzeigen (?)">⌨️</button>
+  <button class="tbtn btn-blue" id="scrape-btn" onclick="runScraper()">↓<span class="tbtn-label"> Neue Dateien</span></button>
 </div>
 
 <!-- Layout -->
