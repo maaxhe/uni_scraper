@@ -873,18 +873,13 @@ body {
   font-family: "SF Mono", "JetBrains Mono", monospace; font-size: 12px;
   color: var(--text2); line-height: 1.75; white-space: pre-wrap; word-break: break-word;
 }
-.preview-body.pdf-wrap { padding: 0; position: relative; overflow: hidden; }
-.preview-body.pdf-wrap iframe {
-  position: absolute; inset: 0; width: 100%; height: 100%; border: none;
+.preview-body.pdf-wrap {
+  padding: 0; overflow-y: auto; overflow-x: hidden;
+  background: #444; display: flex; flex-direction: column; align-items: center; gap: 8px;
 }
-/* Transparent overlay for intercepting Ctrl+scroll wheel events */
-#pdf-wheel-overlay {
-  position: absolute; inset: 0; z-index: 2;
-  background: transparent; cursor: zoom-in;
-  display: none;
+.pdf-page-canvas {
+  display: block; box-shadow: 0 2px 8px rgba(0,0,0,.6);
 }
-/* Block iframe mouse events while a resize is in progress */
-iframe.no-pointer { pointer-events: none; }
 
 /* Fullscreen */
 .preview-box:fullscreen { border-radius: 0; }
@@ -1219,6 +1214,8 @@ iframe.no-pointer { pointer-events: none; }
 .search-source-notes   { background: rgba(167,139,250,.12); color: var(--purple); }
 .search-source-both    { background: rgba(52,211,153,.12);  color: var(--green); }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
 </head>
 <body>
 
@@ -1933,9 +1930,9 @@ async function previewFile(filename) {
     <span class="preview-header-name">${esc(filename)}</span>
     ${isPdf ? `
       <div class="zoom-controls">
-        <button class="zoom-btn" onclick="changePdfZoom(-25)" title="Verkleinern">−</button>
+        <button class="zoom-btn" onclick="changePdfZoom(-20)" title="Verkleinern">−</button>
         <span class="zoom-label" id="zoom-label">Auto</span>
-        <button class="zoom-btn" onclick="changePdfZoom(25)" title="Vergrößern">+</button>
+        <button class="zoom-btn" onclick="changePdfZoom(20)" title="Vergrößern">+</button>
       </div>` : ''}
     <a href="/api/file-raw/${enc(activeCourse)}/${enc(filename)}" download title="Herunterladen"
        style="color:var(--text3);font-size:13px;text-decoration:none" onclick="event.stopPropagation()">⬇</a>
@@ -1944,73 +1941,115 @@ async function previewFile(filename) {
   body.className = 'preview-body';
 
   if (isPdf) {
-    pdfZoom = 'page-width';
-    _pdfBaseSrc = `/api/file-raw/${enc(activeCourse)}/${enc(filename)}`;
+    _pdfScale = null; // null = auto-fit
+    _pdfUrl = `/api/file-raw/${enc(activeCourse)}/${enc(filename)}`;
     body.className = 'preview-body pdf-wrap';
-    body.innerHTML = `<iframe id="pdf-iframe" src="${_pdfSrc('page-width')}"></iframe>`;
+    body.innerHTML = '';
+    await _loadPdfJs(body);
+    _setupPdfResizeObserver(body);
     _setupPdfWheelZoom(body);
-    // Resize: reload with page-width after resize stops (auto mode only)
-    if (_pdfRO) _pdfRO.disconnect();
-    _pdfRO = new ResizeObserver(() => {
-      if (pdfZoom !== 'page-width') return;
-      clearTimeout(_pdfROTimer);
-      _pdfROTimer = setTimeout(applyPdfZoom, 500);
-    });
-    _pdfRO.observe(body);
   } else {
     const data = await fetch(`/api/file-text/${enc(activeCourse)}/${enc(filename)}`).then(r => r.json());
     body.innerHTML = esc(data.text || '(Kein Text lesbar)');
   }
 }
 
-let pdfZoom = 'page-width';  // 'page-width' | integer percent
-let _pdfBaseSrc = '';
-let _pdfRO = null, _pdfROTimer = null;
+// ── PDF.js state ─────────────────────────────────────────────────────────
+let _pdfUrl   = '';
+let _pdfScale = null;   // null = auto-fit to container width
+let _pdfDoc   = null;
+let _pdfRO    = null, _pdfROTimer = null;
+let _pdfRendering = false;
 
-function _pdfSrc(z) { return `${_pdfBaseSrc}#zoom=${z}`; }
+async function _loadPdfJs(container) {
+  if (_pdfDoc) { _pdfDoc.destroy(); _pdfDoc = null; }
+  try {
+    _pdfDoc = await pdfjsLib.getDocument(_pdfUrl).promise;
+  } catch(e) {
+    container.innerHTML = `<div style="color:var(--red);padding:20px">PDF konnte nicht geladen werden: ${e.message}</div>`;
+    return;
+  }
+  await _renderAllPages(container);
+}
+
+async function _renderAllPages(container) {
+  if (_pdfRendering || !_pdfDoc) return;
+  _pdfRendering = true;
+  container.innerHTML = '';
+  const containerWidth = container.clientWidth || 600;
+  for (let i = 1; i <= _pdfDoc.numPages; i++) {
+    const page = await _pdfDoc.getPage(i);
+    const viewport0 = page.getViewport({ scale: 1 });
+    const scale = _pdfScale !== null ? _pdfScale : (containerWidth - 16) / viewport0.width;
+    const viewport = page.getViewport({ scale });
+    const canvas = document.createElement('canvas');
+    canvas.className = 'pdf-page-canvas';
+    canvas.width  = viewport.width;
+    canvas.height = viewport.height;
+    container.appendChild(canvas);
+    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+  }
+  _updateZoomLabel();
+  _pdfRendering = false;
+}
+
+function _updateZoomLabel() {
+  const label = document.getElementById('zoom-label');
+  if (!label || !_pdfDoc) return;
+  if (_pdfScale === null) {
+    label.textContent = 'Auto';
+  } else {
+    // compute percent relative to first page natural width
+    _pdfDoc.getPage(1).then(p => {
+      const vp0 = p.getViewport({ scale: 1 });
+      const containerWidth = document.getElementById('preview-body').clientWidth || 600;
+      const autoScale = (containerWidth - 16) / vp0.width;
+      const pct = Math.round((_pdfScale / autoScale) * 100);
+      label.textContent = pct + '%';
+    });
+  }
+}
 
 function applyPdfZoom() {
-  const iframe = document.getElementById('pdf-iframe');
-  if (!iframe) return;
-  iframe.src = _pdfSrc(pdfZoom);
-  const label = document.getElementById('zoom-label');
-  if (label) label.textContent = pdfZoom === 'page-width' ? 'Auto' : pdfZoom + '%';
+  const body = document.getElementById('preview-body');
+  if (!body || !_pdfDoc) return;
+  _renderAllPages(body);
 }
 
 function changePdfZoom(delta) {
-  if (pdfZoom === 'page-width') pdfZoom = 100;
-  pdfZoom = Math.min(300, Math.max(25, pdfZoom + delta));
-  applyPdfZoom();
+  const body = document.getElementById('preview-body');
+  if (!body || !_pdfDoc) return;
+  if (_pdfScale === null) {
+    // initialise from auto scale
+    _pdfDoc.getPage(1).then(p => {
+      const vp0 = p.getViewport({ scale: 1 });
+      const containerWidth = body.clientWidth || 600;
+      _pdfScale = (containerWidth - 16) / vp0.width;
+      _pdfScale = Math.min(5, Math.max(0.25, _pdfScale * (1 + delta / 100)));
+      _renderAllPages(body);
+    });
+    return;
+  }
+  _pdfScale = Math.min(5, Math.max(0.25, _pdfScale * (1 + delta / 100)));
+  _renderAllPages(body);
 }
 
-// ── Ctrl + scroll wheel zoom ──────────────────────────────────────────────
-// A transparent overlay intercepts wheel events (iframe swallows them normally).
+function _setupPdfResizeObserver(body) {
+  if (_pdfRO) _pdfRO.disconnect();
+  _pdfRO = new ResizeObserver(() => {
+    if (_pdfScale !== null) return; // only auto-fit
+    clearTimeout(_pdfROTimer);
+    _pdfROTimer = setTimeout(() => _renderAllPages(body), 200);
+  });
+  _pdfRO.observe(body);
+}
+
 function _setupPdfWheelZoom(body) {
-  // Create or reuse overlay
-  let ov = document.getElementById('pdf-wheel-overlay');
-  if (!ov) {
-    ov = document.createElement('div');
-    ov.id = 'pdf-wheel-overlay';
-    body.appendChild(ov);
-  } else {
-    body.appendChild(ov); // move into current body
-  }
-
-  ov.addEventListener('wheel', e => {
+  body.addEventListener('wheel', e => {
+    if (!_pdfDoc) return;
     e.preventDefault();
-    changePdfZoom(e.deltaY < 0 ? 25 : -25);
+    changePdfZoom(e.deltaY < 0 ? 15 : -15);
   }, { passive: false });
-
-  // Show overlay only while Ctrl/Cmd is held
-  document.addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && document.getElementById('pdf-iframe')) {
-      ov.style.display = 'block';
-      ov.style.cursor = 'zoom-in';
-    }
-  });
-  document.addEventListener('keyup', e => {
-    if (!e.ctrlKey && !e.metaKey) ov.style.display = 'none';
-  });
 }
 
 function togglePreviewFullscreen() {
@@ -2022,11 +2061,14 @@ function togglePreviewFullscreen() {
   }
 }
 
-// Update fullscreen button icon; reload PDF after layout settles
+// Update fullscreen button icon; re-render PDF after layout settles
 document.addEventListener('fullscreenchange', () => {
   const btn = document.getElementById('fullscreen-btn');
   if (btn) btn.textContent = document.fullscreenElement ? '✕' : '⛶';
-  setTimeout(applyPdfZoom, 150);
+  setTimeout(() => {
+    _pdfScale = null; // reset to auto-fit
+    applyPdfZoom();
+  }, 150);
 });
 
 function toggleAllFiles() {
