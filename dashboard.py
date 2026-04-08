@@ -77,14 +77,25 @@ def _course_info(rel_path: str, d: Path, progress: dict) -> dict:
 
 SEMESTER_RE = re.compile(r'(?:SoSe|WiSe|SS|WS)\s*\d{2}', re.IGNORECASE)
 
+def _semester_sort_key(name: str) -> int:
+    """
+    Returns a numeric sort key so semesters order newest-first.
+    SoSe YYYY → YYYY * 2 + 1   (e.g. SoSe 2026 = 4053)
+    WiSe YYYY_ZZ → YYYY * 2 + 2 (e.g. WiSe 2025_26 = 4052)
+    Higher = newer.
+    """
+    m = re.search(r'(\d{4})', name)
+    if not m:
+        return 0
+    year = int(m.group(1))
+    if re.search(r'(?:SoSe|SS)', name, re.IGNORECASE):
+        return year * 2 + 1
+    else:  # WiSe / WS
+        return year * 2 + 2
+
 def get_courses():
     progress = load_progress()
     dirs = [d for d in COURSES_DIR.iterdir() if d.is_dir()]
-
-    def sort_key(d):
-        is_sem = bool(SEMESTER_RE.search(d.name))
-        # Semester dirs first (newest first via reverse name sort), then others alphabetically
-        return (0 if is_sem else 1, d.name if not is_sem else "".join(reversed(d.name)))
 
     semester_items = []
     other_items = []
@@ -111,8 +122,8 @@ def get_courses():
         else:
             other_items.append(_course_info(d.name, d, progress))
 
-    # Semester groups newest-first (reverse alphabetical on name works for "SoSe/WiSe YYYY")
-    semester_items.sort(key=lambda x: x["name"], reverse=True)
+    # Semester groups newest-first using proper calendar order
+    semester_items.sort(key=lambda x: _semester_sort_key(x["name"]), reverse=True)
     return semester_items + other_items
 
 def list_files(course_dir: Path) -> list[str]:
