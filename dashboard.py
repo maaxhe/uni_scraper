@@ -873,8 +873,8 @@ body {
   font-family: "SF Mono", "JetBrains Mono", monospace; font-size: 12px;
   color: var(--text2); line-height: 1.75; white-space: pre-wrap; word-break: break-word;
 }
-.preview-body.pdf-wrap { padding: 0; }
-.preview-body.pdf-wrap iframe { width: 100%; height: 100%; border: none; display: block; }
+.preview-body.pdf-wrap { padding: 0; position: relative; overflow: hidden; }
+.preview-body.pdf-wrap iframe { position: absolute; inset: 0; border: none; width: 100%; height: 100%; }
 /* Block iframe mouse events while a resize is in progress */
 iframe.no-pointer { pointer-events: none; }
 
@@ -1940,26 +1940,17 @@ async function previewFile(filename) {
     _pdfBaseSrc = `/api/file-raw/${enc(activeCourse)}/${enc(filename)}`;
     body.className = 'preview-body pdf-wrap';
     body.innerHTML = `<iframe id="pdf-iframe" src="${_pdfSrc()}"></iframe>`;
-    // Auto-refit when the preview panel is resized
-    if (_pdfResizeObserver) _pdfResizeObserver.disconnect();
-    _pdfResizeObserver = new ResizeObserver(() => {
-      if (pdfZoom === 'auto') applyPdfZoom();
-    });
-    _pdfResizeObserver.observe(body);
   } else {
     const data = await fetch(`/api/file-text/${enc(activeCourse)}/${enc(filename)}`).then(r => r.json());
     body.innerHTML = esc(data.text || '(Kein Text lesbar)');
   }
 }
 
-// 'auto' = page-width (browser native fit), or a number like 100/150
-let pdfZoom = 'auto';
+let pdfZoom = 'auto';  // 'auto' = page-width, or integer percent
 let _pdfBaseSrc = '';
-let _pdfResizeObserver = null;
 
 function _pdfSrc() {
-  const z = pdfZoom === 'auto' ? 'page-width' : pdfZoom;
-  return `${_pdfBaseSrc}#zoom=${z}`;
+  return `${_pdfBaseSrc}#zoom=${pdfZoom === 'auto' ? 'page-width' : pdfZoom}`;
 }
 
 function applyPdfZoom() {
