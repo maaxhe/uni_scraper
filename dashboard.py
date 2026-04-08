@@ -873,14 +873,26 @@ body {
   font-family: "SF Mono", "JetBrains Mono", monospace; font-size: 12px;
   color: var(--text2); line-height: 1.75; white-space: pre-wrap; word-break: break-word;
 }
-.preview-body.pdf-wrap { padding: 0; }
-.preview-body iframe { width: 100%; height: 100%; border: none; }
+.preview-body.pdf-wrap { padding: 0; overflow: hidden; }
+.pdf-zoom-wrap { width: 100%; height: 100%; overflow: auto; }
+.pdf-zoom-wrap iframe { border: none; display: block; transform-origin: 0 0; }
+/* Block iframe mouse events while a resize is in progress */
+iframe.no-pointer { pointer-events: none; }
 
 /* Fullscreen */
 .preview-box:fullscreen { border-radius: 0; }
 .preview-box:fullscreen .preview-body { height: calc(100vh - 45px); }
 .preview-box:-webkit-full-screen { border-radius: 0; }
 .preview-box:-webkit-full-screen .preview-body { height: calc(100vh - 45px); }
+
+/* Zoom controls in preview header */
+.zoom-controls { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+.zoom-btn { background: none; border: 1px solid var(--border); color: var(--text2);
+  width: 22px; height: 22px; border-radius: 5px; cursor: pointer; font-size: 14px;
+  display: flex; align-items: center; justify-content: center; line-height: 1;
+  transition: background var(--transition), border-color var(--transition); }
+.zoom-btn:hover { background: var(--bg4); border-color: var(--border2); }
+.zoom-label { font-size: 11px; color: var(--text3); min-width: 34px; text-align: center; }
 #fullscreen-btn { background: none; border: none; cursor: pointer; font-size: 15px;
   color: var(--text3); padding: 2px 5px; border-radius: 5px; line-height: 1;
   transition: color var(--transition), background var(--transition); }
@@ -1909,21 +1921,50 @@ async function previewFile(filename) {
   const header = document.getElementById('preview-header');
   const body   = document.getElementById('preview-body');
 
+  const isPdf = ext === 'pdf';
   header.innerHTML = `
     <span class="preview-header-name">${esc(filename)}</span>
+    ${isPdf ? `
+      <div class="zoom-controls">
+        <button class="zoom-btn" onclick="changePdfZoom(-25)" title="Verkleinern">−</button>
+        <span class="zoom-label" id="zoom-label">100%</span>
+        <button class="zoom-btn" onclick="changePdfZoom(25)" title="Vergrößern">+</button>
+      </div>` : ''}
     <a href="/api/file-raw/${enc(activeCourse)}/${enc(filename)}" download title="Herunterladen"
        style="color:var(--text3);font-size:13px;text-decoration:none" onclick="event.stopPropagation()">⬇</a>
-    ${ext === 'pdf' ? `<button id="fullscreen-btn" onclick="togglePreviewFullscreen()" title="Vollbild (F)">⛶</button>` : ''}`;
+    ${isPdf ? `<button id="fullscreen-btn" onclick="togglePreviewFullscreen()" title="Vollbild (F)">⛶</button>` : ''}`;
   body.innerHTML = '<div class="preview-placeholder"><div class="icon">⏳</div><div>Lade…</div></div>';
   body.className = 'preview-body';
 
-  if (ext === 'pdf') {
+  if (isPdf) {
+    pdfZoom = 100;
     body.className = 'preview-body pdf-wrap';
-    body.innerHTML = `<iframe src="/api/file-raw/${enc(activeCourse)}/${enc(filename)}"></iframe>`;
+    body.innerHTML = `<div class="pdf-zoom-wrap"><iframe id="pdf-iframe" src="/api/file-raw/${enc(activeCourse)}/${enc(filename)}"></iframe></div>`;
+    applyPdfZoom();
   } else {
     const data = await fetch(`/api/file-text/${enc(activeCourse)}/${enc(filename)}`).then(r => r.json());
     body.innerHTML = esc(data.text || '(Kein Text lesbar)');
   }
+}
+
+let pdfZoom = 100;
+
+function applyPdfZoom() {
+  const iframe = document.getElementById('pdf-iframe');
+  if (!iframe) return;
+  const wrap = iframe.parentElement;
+  const scale = pdfZoom / 100;
+  // Scale the iframe via CSS transform; compensate so it fills wrap width at 100%
+  iframe.style.width  = (wrap.clientWidth  / scale) + 'px';
+  iframe.style.height = (wrap.clientHeight / scale) + 'px';
+  iframe.style.transform = `scale(${scale})`;
+  const label = document.getElementById('zoom-label');
+  if (label) label.textContent = pdfZoom + '%';
+}
+
+function changePdfZoom(delta) {
+  pdfZoom = Math.min(300, Math.max(25, pdfZoom + delta));
+  applyPdfZoom();
 }
 
 function togglePreviewFullscreen() {
@@ -1935,10 +1976,12 @@ function togglePreviewFullscreen() {
   }
 }
 
-// Update fullscreen button icon when state changes via Esc etc.
+// Update fullscreen button icon and re-apply zoom when state changes
 document.addEventListener('fullscreenchange', () => {
   const btn = document.getElementById('fullscreen-btn');
   if (btn) btn.textContent = document.fullscreenElement ? '✕' : '⛶';
+  // Recalculate after layout settles
+  requestAnimationFrame(() => applyPdfZoom());
 });
 
 function toggleAllFiles() {
@@ -2615,15 +2658,20 @@ function setupColResize(divider, targetEl, minW, maxW, storageKey) {
     startX = e.clientX;
     startW = targetEl.getBoundingClientRect().width;
     divider.classList.add('dragging');
+    // Prevent iframes from swallowing mouse events during drag
+    document.querySelectorAll('iframe').forEach(f => f.classList.add('no-pointer'));
 
     function onMove(e) {
       const newW = Math.min(maxW, Math.max(minW, startW + e.clientX - startX));
       targetEl.style.width = newW + 'px';
       if (storageKey === 'sidebar_width') targetEl.style.minWidth = newW + 'px';
+      applyPdfZoom(); // keep PDF scaled to new size
     }
     function onUp() {
       divider.classList.remove('dragging');
+      document.querySelectorAll('iframe').forEach(f => f.classList.remove('no-pointer'));
       localStorage.setItem(storageKey, parseInt(targetEl.style.width));
+      applyPdfZoom();
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
     }
