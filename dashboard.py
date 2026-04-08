@@ -809,7 +809,7 @@ body {
 .files-preview-col { flex: 1; min-width: 0; overflow: hidden; }
 
 .file-item {
-  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
   border-radius: var(--radius); cursor: pointer;
   transition: background var(--transition), border-color var(--transition);
   border: 1px solid transparent; margin-bottom: 1px;
@@ -818,8 +818,30 @@ body {
 .file-item.active { background: var(--bg4); border-color: rgba(79,142,247,.4); }
 .file-item.new-file { border-color: rgba(251,191,36,.25); }
 .file-item input[type=checkbox] { accent-color: var(--blue); flex-shrink: 0; cursor: pointer; }
-.file-icon { font-size: 15px; flex-shrink: 0; }
+.file-icon { font-size: 14px; flex-shrink: 0; }
 .file-name { font-size: 12px; color: var(--text2); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Folder tree */
+.folder-item {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 8px; border-radius: var(--radius);
+  cursor: pointer; user-select: none;
+  transition: background var(--transition);
+  margin-bottom: 1px;
+}
+.folder-item:hover { background: var(--bg3); }
+.folder-chevron {
+  font-size: 8px; color: var(--text3); width: 10px; flex-shrink: 0;
+  transition: transform var(--transition);
+}
+.folder-item.collapsed .folder-chevron { transform: rotate(-90deg); }
+.folder-icon { font-size: 13px; flex-shrink: 0; }
+.folder-name { font-size: 11px; font-weight: 600; color: var(--text3); flex: 1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.folder-count { font-size: 10px; color: var(--text3); background: var(--bg3);
+  padding: 1px 5px; border-radius: 8px; flex-shrink: 0; }
+.folder-contents { overflow: hidden; }
+.folder-contents.collapsed { display: none; }
 
 .file-actions {
   margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
@@ -1785,23 +1807,76 @@ async function loadFiles() {
        </div>`
     : '';
 
-  el.innerHTML = banner + files.map(f => {
+  el.innerHTML = banner + renderFileTree(buildFileTree(files), files, summaryAge, metaMap, 0);
+}
+
+// Build a nested tree from flat relative paths
+function buildFileTree(files) {
+  const root = { dirs: {}, files: [] };
+  for (const f of files) {
+    const parts = f.split('/');
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const p = parts[i];
+      if (!node.dirs[p]) node.dirs[p] = { dirs: {}, files: [], path: parts.slice(0, i + 1).join('/') };
+      node = node.dirs[p];
+    }
+    node.files.push(f);
+  }
+  return root;
+}
+
+function countTreeFiles(node) {
+  return node.files.length + Object.values(node.dirs).reduce((s, d) => s + countTreeFiles(d), 0);
+}
+
+// Globally track collapsed folder paths for the current course
+const _collapsedFolders = new Set();
+
+function renderFileTree(node, allFiles, summaryAge, metaMap, depth) {
+  let html = '';
+  const indent = depth * 14;
+
+  // Files at this level
+  for (const f of node.files) {
     const m = metaMap[f] || {};
     const isNew = summaryAge && m.mtime && m.mtime > summaryAge;
-    const sizeStr = m.size ? (m.size > 1048576 ? (m.size/1048576).toFixed(1)+'MB' : Math.round(m.size/1024)+'KB') : '';
-    const displayName = f.includes('/') ? f.split('/').pop() : f;
-    const dirPart = f.includes('/') ? f.substring(0, f.lastIndexOf('/')) : '';
-    return `
-    <div class="file-item${isNew ? ' new-file' : ''}" data-filename="${esc(f)}" onclick="previewFileFromEl(this)">
+    const displayName = f.split('/').pop();
+    html += `
+    <div class="file-item${isNew ? ' new-file' : ''}" data-filename="${esc(f)}"
+         style="padding-left:${8 + indent}px" onclick="previewFileFromEl(this)">
       <input type="checkbox" name="file" value="${esc(f)}" checked onclick="event.stopPropagation()">
       <span class="file-icon">${fileIcon(f)}</span>
-      <span class="file-name" title="${esc(f)}">
-        ${dirPart ? `<span style="color:var(--text3);font-size:10px">${esc(dirPart)}/</span>` : ''}
-        ${esc(displayName)}${isNew ? '<span class="new-badge">Neu</span>' : ''}
-      </span>
-      ${sizeStr ? `<span class="file-meta-info">${sizeStr}</span>` : ''}
+      <span class="file-name" title="${esc(f)}">${esc(displayName)}${isNew ? '<span class="new-badge">Neu</span>' : ''}</span>
     </div>`;
-  }).join('');
+  }
+
+  // Subfolders
+  for (const [name, child] of Object.entries(node.dirs).sort(([a],[b]) => a.localeCompare(b))) {
+    const folderPath = child.path;
+    const collapsed = _collapsedFolders.has(folderPath);
+    const count = countTreeFiles(child);
+    html += `
+    <div class="folder-item${collapsed ? ' collapsed' : ''}" style="padding-left:${8 + indent}px"
+         onclick="toggleFileFolder('${esc(folderPath)}', this)">
+      <span class="folder-chevron">▼</span>
+      <span class="folder-icon">📁</span>
+      <span class="folder-name">${esc(name)}</span>
+      <span class="folder-count">${count}</span>
+    </div>
+    <div class="folder-contents${collapsed ? ' collapsed' : ''}" data-folder="${esc(folderPath)}">
+      ${renderFileTree(child, allFiles, summaryAge, metaMap, depth + 1)}
+    </div>`;
+  }
+  return html;
+}
+
+function toggleFileFolder(path, headerEl) {
+  const collapsed = _collapsedFolders.has(path);
+  if (collapsed) _collapsedFolders.delete(path); else _collapsedFolders.add(path);
+  headerEl.classList.toggle('collapsed', !collapsed);
+  const contents = document.querySelector(`.folder-contents[data-folder="${CSS.escape(path)}"]`);
+  if (contents) contents.classList.toggle('collapsed', !collapsed);
 }
 
 function previewFileFromEl(el) { previewFile(el.dataset.filename); }
