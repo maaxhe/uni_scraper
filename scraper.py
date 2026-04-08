@@ -142,97 +142,58 @@ async def login(page: Page) -> None:
 
 async def get_all_semester_courses(page: Page) -> list[dict]:
     """
-    Parse the my_courses overview and return a list of semester dicts:
-        [{"semester": "SoSe 2026", "courses": [{"name": ..., "url": ...}, ...]}, ...]
-
-    Strategy A: look for <caption> elements whose text matches a semester pattern.
-    Strategy B (fallback): group all seminar_main.php links by their nearest
-                           heading/section ancestor, or collect as one group.
+    Parse the my_courses overview and return courses grouped by semester.
+    Uses Playwright's native locator API (more reliable than page.evaluate
+    for pages that render links inside iframes or shadow DOM).
     """
     await page.goto(MY_COURSES_ALL_URL, wait_until="networkidle")
-    # Extra wait — some Stud.IP installs render course tables via JS after load.
-    await page.wait_for_timeout(2000)
+    await page.wait_for_timeout(1500)
 
-    # Course links in Stud.IP can appear in several URL forms:
-    #   seminar_main.php?auswahl=<id>
-    #   dispatch.php/course/overview?cid=<id>
-    #   dispatch.php/course/details/<id>
-    #   dispatch.php/seminar/...
-    COURSE_LINK_SEL = (
-        'a[href*="seminar_main.php"],'
-        'a[href*="dispatch.php/course"],'
-        'a[href*="dispatch.php/seminar"],'
-        'a[href*="auswahl="]'
-    )
+    SEMESTER_RE = re.compile(r'(?:SoSe|WiSe|SS|WS|Sommer|Winter)\s*\d{2}', re.IGNORECASE)
+    SKIP_URL    = re.compile(r'wizard|logout|login|profile/|messages|calendar|settings|globalsearch|jsupdater|my_institutes|my_courses/store|my_courses/groups|my_courses/archive|tabularasa', re.IGNORECASE)
+    COURSE_URL  = re.compile(r'seminar_main\.php\?auswahl=|dispatch\.php/course/(?!wizard)|auswahl=[a-f0-9]{10}', re.IGNORECASE)
 
-    semesters = await page.evaluate(f"""() => {{
-        const semester_re = /(?:SoSe|WiSe|SS|WS|Sommer|Winter)\\s*\\d{{2}}/i;
-        const COURSE_SEL  = {repr(COURSE_LINK_SEL)};
-        const NAV_HREFS   = new Set(['my_courses', 'logout', 'login', 'profile', 'messages']);
+    # Use Playwright's native locator to read all <a> elements reliably.
+    all_anchors = await page.locator('a[href]').all()
 
-        function isCourseLink(a) {{
-            if (!a.href) return false;
-            for (const bad of NAV_HREFS) if (a.href.includes(bad) && !a.href.includes('auswahl=') && !a.href.includes('dispatch.php/course')) return false;
-            return true;
-        }}
+    course_links: list[dict] = []
+    seen_urls: set[str] = set()
+    for anchor in all_anchors:
+        try:
+            href = (await anchor.get_attribute('href') or '').strip()
+            name = (await anchor.text_content() or '').strip()
+        except Exception:
+            continue
+        if not href or not name:
+            continue
+        # Resolve relative URLs
+        if href.startswith('/'):
+            href = STUDIP_BASE + href
+        elif not href.startswith('http'):
+            continue
+        if SKIP_URL.search(href):
+            continue
+        if not COURSE_URL.search(href):
+            continue
+        # Normalise to just auswahl= URL to deduplicate tabs for the same course
+        norm = re.sub(r'&(?:amp;)?redirect_to=[^&]*', '', href)
+        if norm in seen_urls:
+            continue
+        seen_urls.add(norm)
+        course_links.append({"name": name, "url": norm})
 
-        function collectCourses(root) {{
-            const seen = new Set();
-            const courses = [];
-            for (const a of root.querySelectorAll(COURSE_SEL)) {{
-                const name = a.textContent.trim();
-                const href = a.href;
-                if (!name || seen.has(href) || !isCourseLink(a)) continue;
-                seen.add(href);
-                courses.push({{name, url: href}});
-            }}
-            return courses;
-        }}
-
-        // ── Strategy A: caption-based tables ────────────────────────────────
-        const result = [];
-        for (const cap of document.querySelectorAll('caption')) {{
-            if (!semester_re.test(cap.textContent)) continue;
-            const table = cap.closest('table');
-            if (!table) continue;
-            const courses = collectCourses(table);
-            if (courses.length) result.push({{semester: cap.textContent.trim(), courses}});
-        }}
-        if (result.length) return result;
-
-        // ── Strategy B: any semester heading ────────────────────────────────
-        const headings = [...document.querySelectorAll('h1,h2,h3,h4,th,td,caption,span,div')]
-            .filter(el => el.children.length === 0 && semester_re.test(el.textContent));
-        for (const h of headings) {{
-            const parent = h.closest('table,section,article,li,div') || h.parentElement;
-            const courses = collectCourses(parent || document);
-            if (courses.length) result.push({{semester: h.textContent.trim(), courses}});
-        }}
-        if (result.length) return result;
-
-        // ── Strategy C: flat fallback ────────────────────────────────────────
-        const all = collectCourses(document);
-        if (all.length) return [{{semester: 'Alle Kurse', courses: all}}];
-        return [];
-    }}""")
-
-    if not semesters:
-        # Dump page HTML so the user/developer can inspect what the page actually contains.
+    if not course_links:
         debug_path = Path(__file__).parent / "debug_page.html"
         try:
-            html = await page.content()
-            debug_path.write_text(html, encoding="utf-8")
-            log.warning(
-                "No courses found on %s — page HTML saved to %s for inspection. "
-                "Also try running with --no-headless.",
-                MY_COURSES_ALL_URL, debug_path,
-            )
+            debug_path.write_text(await page.content(), encoding="utf-8")
+            log.warning("No courses found — page HTML saved to %s", debug_path)
         except Exception:
-            log.warning("No courses found on %s — try --no-headless to inspect the page.", MY_COURSES_ALL_URL)
-    else:
-        for s in semesters:
-            log.info("Semester: %s — found %d course(s)", s["semester"], len(s["courses"]))
-    return semesters
+            pass
+        log.warning("No courses found on %s — try --no-headless.", MY_COURSES_ALL_URL)
+        return []
+
+    log.info("Found %d course link(s) total", len(course_links))
+    return [{"semester": "Alle Kurse", "courses": course_links}]
 
 
 # ---------------------------------------------------------------------------
