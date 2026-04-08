@@ -138,11 +138,12 @@ async def login(page: Page) -> None:
 # Semester course discovery
 # ---------------------------------------------------------------------------
 
-async def get_current_semester_courses(page: Page) -> list[dict]:
+async def get_all_semester_courses(page: Page) -> list[dict]:
     """
-    Parse the my_courses overview and return course dicts for the FIRST
-    (most recent) semester — identified by the first <caption> that matches
-    a semester pattern (e.g. "SoSe 2026").
+    Parse the my_courses overview and return a list of semester dicts:
+        [{"semester": "SoSe 2026", "courses": [{"name": ..., "url": ...}, ...]}, ...]
+
+    All semesters visible on the page are returned, newest first.
 
     DOM structure on studip.uni-osnabrueck.de (2025/26):
       <table>
@@ -154,59 +155,35 @@ async def get_current_semester_courses(page: Page) -> list[dict]:
     """
     await page.goto(MY_COURSES_URL, wait_until="networkidle")
 
-    # Find the first semester table by its <caption>.
-    first_semester_table = await page.evaluate("""() => {
-        const captions = document.querySelectorAll('caption');
-        for (const cap of captions) {
-            if (/(?:SoSe|WiSe|SS|WS)\\s*\\d{2}/i.test(cap.textContent)) {
-                return cap.closest('table')?.innerHTML ?? null;
-            }
-        }
-        return null;
-    }""")
-
-    if not first_semester_table:
-        log.warning("No semester table found — will scrape ALL seminar_main links on page.")
-
-    # Extract course links: only seminar_main.php?auswahl= with non-empty text,
-    # and only from the first semester table (if found).
-    rows = await page.evaluate("""() => {
+    semesters = await page.evaluate("""() => {
         const semester_re = /(?:SoSe|WiSe|SS|WS)\\s*\\d{2}/i;
-        let table = null;
+        const result = [];
         for (const cap of document.querySelectorAll('caption')) {
-            if (semester_re.test(cap.textContent)) {
-                table = cap.closest('table');
-                break;
+            if (!semester_re.test(cap.textContent)) continue;
+            const label = cap.textContent.trim();
+            const table = cap.closest('table');
+            if (!table) continue;
+            const seen = new Set();
+            const courses = [];
+            for (const a of table.querySelectorAll('a[href*="seminar_main.php"]')) {
+                const name = a.textContent.trim();
+                const href = a.href;
+                if (!name || seen.has(href)) continue;
+                if (a.closest('td') === null) continue;
+                seen.add(href);
+                courses.push({name, url: href});
             }
+            result.push({semester: label, courses});
         }
-        const root = table ?? document;
-        const seen = new Set();
-        const results = [];
-        for (const a of root.querySelectorAll('a[href*="seminar_main.php"]')) {
-            const name = a.textContent.trim();
-            const href = a.href;
-            // Skip empty-text links (icons) and duplicates
-            if (!name || seen.has(href)) continue;
-            // Skip nav/action links that aren't course name cells
-            if (a.closest('td') === null) continue;
-            seen.add(href);
-            results.push({name, url: href});
-        }
-        return results;
+        return result;
     }""")
 
-    semester_label = await page.evaluate("""() => {
-        for (const cap of document.querySelectorAll('caption')) {
-            if (/(?:SoSe|WiSe|SS|WS)\\s*\\d{2}/i.test(cap.textContent))
-                return cap.textContent.trim();
-        }
-        return 'unknown';
-    }""")
-
-    log.info("Current semester: %s — found %d course(s)", semester_label, len(rows))
-    for c in rows:
-        log.debug("  %s  →  %s", c["name"], c["url"])
-    return rows
+    if not semesters:
+        log.warning("No semester tables found — check CSS selectors.")
+    else:
+        for s in semesters:
+            log.info("Semester: %s — found %d course(s)", s["semester"], len(s["courses"]))
+    return semesters
 
 
 # ---------------------------------------------------------------------------
@@ -369,19 +346,23 @@ async def main() -> None:
                     output_root,
                 )
             else:
-                # ── Mode A: current semester ───────────────────────────────
-                log.info("Mode A — scraping current semester…")
-                courses = await get_current_semester_courses(page)
+                # ── Mode A: all semesters ──────────────────────────────────
+                log.info("Mode A — scraping all semesters…")
+                semesters = await get_all_semester_courses(page)
 
-                if not courses:
+                if not semesters:
                     log.warning(
                         "No courses found. The CSS selectors for the course list "
                         "may need updating — run with --no-headless to inspect the page."
                     )
                     return
 
-                for course in courses:
-                    await download_course_files(page, course, output_root)
+                for sem in semesters:
+                    semester_dir = output_root / sanitize_dirname(sem["semester"])
+                    semester_dir.mkdir(parents=True, exist_ok=True)
+                    log.info("── Semester: %s", sem["semester"])
+                    for course in sem["courses"]:
+                        await download_course_files(page, course, semester_dir)
 
         finally:
             await browser.close()

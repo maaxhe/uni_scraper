@@ -75,29 +75,45 @@ def _course_info(rel_path: str, d: Path, progress: dict) -> dict:
         "is_group":    False,
     }
 
+SEMESTER_RE = re.compile(r'(?:SoSe|WiSe|SS|WS)\s*\d{2}', re.IGNORECASE)
+
 def get_courses():
-    result = []
     progress = load_progress()
-    for d in sorted(COURSES_DIR.iterdir()):
-        if not d.is_dir():
-            continue
-        # Count direct subdirectories (ignore hidden)
+    dirs = [d for d in COURSES_DIR.iterdir() if d.is_dir()]
+
+    def sort_key(d):
+        is_sem = bool(SEMESTER_RE.search(d.name))
+        # Semester dirs first (newest first via reverse name sort), then others alphabetically
+        return (0 if is_sem else 1, d.name if not is_sem else "".join(reversed(d.name)))
+
+    semester_items = []
+    other_items = []
+
+    for d in sorted(dirs, key=lambda d: d.name):
+        is_semester = bool(SEMESTER_RE.search(d.name))
         sub_dirs = sorted([sd for sd in d.iterdir() if sd.is_dir() and not sd.name.startswith('.')])
-        if len(sub_dirs) >= 2:
-            # Treat as a group — each subdir is its own course
+        if is_semester or len(sub_dirs) >= 2:
             sub_courses = [
                 _course_info(f"{d.name}/{sd.name}", sd, progress)
                 for sd in sub_dirs
             ]
-            result.append({
-                "name":     d.name,
-                "path":     d.name,
-                "is_group": True,
-                "courses":  sub_courses,
-            })
+            entry = {
+                "name":        d.name,
+                "path":        d.name,
+                "is_group":    True,
+                "is_semester": is_semester,
+                "courses":     sub_courses,
+            }
+            if is_semester:
+                semester_items.append(entry)
+            else:
+                other_items.append(entry)
         else:
-            result.append(_course_info(d.name, d, progress))
-    return result
+            other_items.append(_course_info(d.name, d, progress))
+
+    # Semester groups newest-first (reverse alphabetical on name works for "SoSe/WiSe YYYY")
+    semester_items.sort(key=lambda x: x["name"], reverse=True)
+    return semester_items + other_items
 
 def list_files(course_dir: Path) -> list[str]:
     return sorted([
@@ -646,6 +662,11 @@ body {
 .group-chevron { font-size: 8px; color: var(--text3); width: 10px; flex-shrink: 0; transition: transform var(--transition); }
 .group-name { font-size: 10px; font-weight: 700; color: var(--text3); text-transform: uppercase; letter-spacing: .08em; flex: 1; }
 .group-meta { font-size: 10px; color: var(--text3); background: var(--bg3); padding: 1px 6px; border-radius: 8px; }
+
+/* Semester group header — visually distinct */
+.semester-header { border-left-color: var(--blue); margin-top: 10px; }
+.semester-header .group-name { color: var(--blue); letter-spacing: .06em; }
+.semester-header .group-meta { background: rgba(79,142,247,.12); color: var(--blue); }
 
 /* Global learn button at sidebar bottom */
 #global-learn-btn {
@@ -1483,10 +1504,12 @@ function renderSidebar(tree) {
     const collapsed = collapsedGroups.has(item.name);
     const total    = item.courses.length;
     const withSum  = item.courses.filter(c => c.has_summary).length;
+    const semClass = item.is_semester ? 'group-header semester-header' : 'group-header';
+    const icon     = item.is_semester ? '🎓 ' : '';
     return `
-    <div class="group-header" onclick="toggleGroup('${esc(item.name)}')">
+    <div class="${semClass}" onclick="toggleGroup('${esc(item.name)}')">
       <span class="group-chevron">${collapsed ? '▶' : '▼'}</span>
-      <span class="group-name">${esc(item.name)}</span>
+      <span class="group-name">${icon}${esc(item.name)}</span>
       <span class="group-meta">${withSum}/${total}</span>
     </div>
     ${collapsed ? '' : item.courses.map(c => courseHTML(c, true)).join('')}`;
