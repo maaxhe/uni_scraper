@@ -1,2 +1,8 @@
-playwright>=1.44.0
-python-dotenv>=1.0.0
+anthropic
+flask
+markdown2
+playwright
+pymupdf
+python-docx
+python-dotenv
+python-pptx
