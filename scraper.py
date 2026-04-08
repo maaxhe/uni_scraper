@@ -28,6 +28,8 @@ load_dotenv()
 STUDIP_BASE = "https://studip.uni-osnabrueck.de"
 LOGIN_URL = f"{STUDIP_BASE}/index.php"
 MY_COURSES_URL = f"{STUDIP_BASE}/dispatch.php/my_courses"
+# With sem_select=all Stud.IP shows every past semester, not just the current one.
+MY_COURSES_ALL_URL = f"{STUDIP_BASE}/dispatch.php/my_courses?sem_select=all"
 
 # Selectors for the Stud.IP login form on index.php.
 # If login fails, open index.php in a browser, right-click the username field
@@ -153,7 +155,7 @@ async def get_all_semester_courses(page: Page) -> list[dict]:
             <td><a href="seminar_main.php?auswahl=<id>">Course Name</a></td>
             ...
     """
-    await page.goto(MY_COURSES_URL, wait_until="networkidle")
+    await page.goto(MY_COURSES_ALL_URL, wait_until="networkidle")
 
     semesters = await page.evaluate("""() => {
         const semester_re = /(?:SoSe|WiSe|SS|WS)\\s*\\d{2}/i;

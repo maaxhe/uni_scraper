@@ -128,7 +128,7 @@ def get_courses():
 
 def list_files(course_dir: Path) -> list[str]:
     return sorted([
-        f.name for f in course_dir.rglob("*")
+        str(f.relative_to(course_dir)) for f in course_dir.rglob("*")
         if f.is_file()
         and f.suffix.lower() in SUPPORTED_EXT
         and f.name != OUTPUT_FILENAME
@@ -576,11 +576,23 @@ body {
 /* ── Layout ── */
 #layout { display: flex; flex: 1; overflow: hidden; }
 
+/* ── Sidebar toggle button ── */
+#sidebar-toggle {
+  width: 30px; height: 30px; border-radius: var(--radius);
+  background: none; border: 1px solid var(--border);
+  color: var(--text3); cursor: pointer; font-size: 14px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+  transition: background var(--transition), color var(--transition), border-color var(--transition);
+  flex-shrink: 0;
+}
+#sidebar-toggle:hover { background: var(--bg3); color: var(--text2); border-color: var(--border2); }
+
 /* ── Sidebar ── */
 #sidebar {
   width: 260px; min-width: 150px; max-width: 480px;
   background: var(--bg2);
   border-right: 1px solid var(--border);
+  transition: width var(--transition), min-width var(--transition), padding var(--transition);
   display: flex; flex-direction: column;
   overflow: hidden;
   flex-shrink: 0;
@@ -701,6 +713,13 @@ body {
   flex-shrink: 0; position: relative; z-index: 5; transition: background var(--transition);
 }
 .resize-divider:hover, .resize-divider.dragging { background: var(--blue); opacity: .6; }
+
+/* Collapsed sidebar */
+#sidebar.collapsed {
+  width: 0 !important; min-width: 0 !important; overflow: hidden;
+  border-right: none;
+}
+#sidebar.collapsed + .resize-divider { display: none; }
 
 /* ── Main ── */
 #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
@@ -1154,6 +1173,7 @@ body {
 
 <!-- Topbar -->
 <div id="topbar">
+  <button id="sidebar-toggle" onclick="toggleSidebar()" title="Kursliste ein-/ausblenden (B)">☰</button>
   <div id="topbar-logo"><span class="logo-icon">📚</span> <span>Stud.IP</span> Dashboard</div>
   <input id="search-global" type="text" placeholder="🔍  Suche in allen Zusammenfassungen… (Ctrl+K)" oninput="handleGlobalSearch(event)">
   <button class="tbtn btn-gray" onclick="goHome()" title="Übersicht (Esc)">Übersicht</button>
@@ -1769,11 +1789,16 @@ async function loadFiles() {
     const m = metaMap[f] || {};
     const isNew = summaryAge && m.mtime && m.mtime > summaryAge;
     const sizeStr = m.size ? (m.size > 1048576 ? (m.size/1048576).toFixed(1)+'MB' : Math.round(m.size/1024)+'KB') : '';
+    const displayName = f.includes('/') ? f.split('/').pop() : f;
+    const dirPart = f.includes('/') ? f.substring(0, f.lastIndexOf('/')) : '';
     return `
-    <div class="file-item${isNew ? ' new-file' : ''}" id="fi-${CSS.escape(f)}" data-filename="${esc(f)}" onclick="previewFileFromEl(this)">
+    <div class="file-item${isNew ? ' new-file' : ''}" data-filename="${esc(f)}" onclick="previewFileFromEl(this)">
       <input type="checkbox" name="file" value="${esc(f)}" checked onclick="event.stopPropagation()">
       <span class="file-icon">${fileIcon(f)}</span>
-      <span class="file-name" title="${esc(f)}">${esc(f)}${isNew ? '<span class="new-badge">Neu</span>' : ''}</span>
+      <span class="file-name" title="${esc(f)}">
+        ${dirPart ? `<span style="color:var(--text3);font-size:10px">${esc(dirPart)}/</span>` : ''}
+        ${esc(displayName)}${isNew ? '<span class="new-badge">Neu</span>' : ''}
+      </span>
       ${sizeStr ? `<span class="file-meta-info">${sizeStr}</span>` : ''}
     </div>`;
   }).join('');
@@ -1787,9 +1812,9 @@ function fileIcon(name) {
 }
 
 async function previewFile(filename) {
-  document.querySelectorAll('.file-item').forEach(el => el.classList.remove('active'));
-  const match = document.querySelector(`.file-item[data-filename="${CSS.escape(filename)}"]`);
-  if (match) match.classList.add('active');
+  document.querySelectorAll('.file-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.filename === filename);
+  });
 
   const ext = filename.split('.').pop().toLowerCase();
   const header = document.getElementById('preview-header');
@@ -2145,6 +2170,10 @@ document.addEventListener('keydown', e => {
     showShortcuts(); return;
   }
 
+  if (e.key === 'b' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+    toggleSidebar(); return;
+  }
+
   // Ctrl+K → focus search
   if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
     e.preventDefault();
@@ -2447,7 +2476,20 @@ async function runScraper() {
 // ═══════════════════════════════════════════════════════════════════════════
 // Resizable dividers
 // ═══════════════════════════════════════════════════════════════════════════
+function toggleSidebar() {
+  const sb = document.getElementById('sidebar');
+  const collapsed = sb.classList.toggle('collapsed');
+  localStorage.setItem('sidebar_collapsed', collapsed ? '1' : '');
+  document.getElementById('sidebar-toggle').textContent = collapsed ? '▶' : '☰';
+}
+
 function initResizeDividers() {
+  // Restore collapsed state
+  if (localStorage.getItem('sidebar_collapsed') === '1') {
+    const sb = document.getElementById('sidebar');
+    sb.classList.add('collapsed');
+    document.getElementById('sidebar-toggle').textContent = '▶';
+  }
   const savedSidebar = localStorage.getItem('sidebar_width');
   if (savedSidebar) document.getElementById('sidebar').style.width = savedSidebar + 'px';
   const savedFilesCol = localStorage.getItem('files_col_width');
