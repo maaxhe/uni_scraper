@@ -151,71 +151,84 @@ async def get_all_semester_courses(page: Page) -> list[dict]:
     """
     await page.goto(MY_COURSES_ALL_URL, wait_until="networkidle")
     # Extra wait — some Stud.IP installs render course tables via JS after load.
-    await page.wait_for_timeout(1500)
+    await page.wait_for_timeout(2000)
 
-    semesters = await page.evaluate("""() => {
-        const semester_re = /(?:SoSe|WiSe|SS|WS|Sommer|Winter)\\s*\\d{2}/i;
+    # Course links in Stud.IP can appear in several URL forms:
+    #   seminar_main.php?auswahl=<id>
+    #   dispatch.php/course/overview?cid=<id>
+    #   dispatch.php/course/details/<id>
+    #   dispatch.php/seminar/...
+    COURSE_LINK_SEL = (
+        'a[href*="seminar_main.php"],'
+        'a[href*="dispatch.php/course"],'
+        'a[href*="dispatch.php/seminar"],'
+        'a[href*="auswahl="]'
+    )
+
+    semesters = await page.evaluate(f"""() => {{
+        const semester_re = /(?:SoSe|WiSe|SS|WS|Sommer|Winter)\\s*\\d{{2}}/i;
+        const COURSE_SEL  = {repr(COURSE_LINK_SEL)};
+        const NAV_HREFS   = new Set(['my_courses', 'logout', 'login', 'profile', 'messages']);
+
+        function isCourseLink(a) {{
+            if (!a.href) return false;
+            for (const bad of NAV_HREFS) if (a.href.includes(bad) && !a.href.includes('auswahl=') && !a.href.includes('dispatch.php/course')) return false;
+            return true;
+        }}
+
+        function collectCourses(root) {{
+            const seen = new Set();
+            const courses = [];
+            for (const a of root.querySelectorAll(COURSE_SEL)) {{
+                const name = a.textContent.trim();
+                const href = a.href;
+                if (!name || seen.has(href) || !isCourseLink(a)) continue;
+                seen.add(href);
+                courses.push({{name, url: href}});
+            }}
+            return courses;
+        }}
 
         // ── Strategy A: caption-based tables ────────────────────────────────
         const result = [];
-        for (const cap of document.querySelectorAll('caption')) {
+        for (const cap of document.querySelectorAll('caption')) {{
             if (!semester_re.test(cap.textContent)) continue;
-            const label = cap.textContent.trim();
             const table = cap.closest('table');
             if (!table) continue;
-            const seen = new Set();
-            const courses = [];
-            for (const a of table.querySelectorAll('a[href*="seminar_main.php"]')) {
-                const name = a.textContent.trim();
-                const href = a.href;
-                if (!name || seen.has(href)) continue;
-                if (a.closest('td') === null) continue;
-                seen.add(href);
-                courses.push({name, url: href});
-            }
-            if (courses.length) result.push({semester: label, courses});
-        }
+            const courses = collectCourses(table);
+            if (courses.length) result.push({{semester: cap.textContent.trim(), courses}});
+        }}
         if (result.length) return result;
 
-        // ── Strategy B: look for any heading + nearby links ──────────────────
-        // Walk the DOM: for every element that looks like a semester heading,
-        // collect the course links that follow it until the next heading.
-        const headings = [...document.querySelectorAll('h1,h2,h3,h4,th,td.header,caption,.semester-label,.toggle-indicator')]
-            .filter(el => semester_re.test(el.textContent));
-        if (headings.length) {
-            for (const h of headings) {
-                const label = h.textContent.trim();
-                const parent = h.closest('table,section,div,li') || h.parentElement;
-                const seen = new Set();
-                const courses = [];
-                for (const a of (parent || document).querySelectorAll('a[href*="seminar_main.php"]')) {
-                    const name = a.textContent.trim();
-                    const href = a.href;
-                    if (!name || seen.has(href)) continue;
-                    seen.add(href);
-                    courses.push({name, url: href});
-                }
-                if (courses.length) result.push({semester: label, courses});
-            }
-            if (result.length) return result;
-        }
+        // ── Strategy B: any semester heading ────────────────────────────────
+        const headings = [...document.querySelectorAll('h1,h2,h3,h4,th,td,caption,span,div')]
+            .filter(el => el.children.length === 0 && semester_re.test(el.textContent));
+        for (const h of headings) {{
+            const parent = h.closest('table,section,article,li,div') || h.parentElement;
+            const courses = collectCourses(parent || document);
+            if (courses.length) result.push({{semester: h.textContent.trim(), courses}});
+        }}
+        if (result.length) return result;
 
-        // ── Strategy C: flat fallback — collect every course link on the page ─
-        const seen = new Set();
-        const courses = [];
-        for (const a of document.querySelectorAll('a[href*="seminar_main.php"]')) {
-            const name = a.textContent.trim();
-            const href = a.href;
-            if (!name || seen.has(href)) continue;
-            seen.add(href);
-            courses.push({name, url: href});
-        }
-        if (courses.length) return [{semester: 'Alle Kurse', courses}];
+        // ── Strategy C: flat fallback ────────────────────────────────────────
+        const all = collectCourses(document);
+        if (all.length) return [{{semester: 'Alle Kurse', courses: all}}];
         return [];
-    }""")
+    }}""")
 
     if not semesters:
-        log.warning("No courses found on %s — try --no-headless to inspect the page.", MY_COURSES_ALL_URL)
+        # Dump page HTML so the user/developer can inspect what the page actually contains.
+        debug_path = Path(__file__).parent / "debug_page.html"
+        try:
+            html = await page.content()
+            debug_path.write_text(html, encoding="utf-8")
+            log.warning(
+                "No courses found on %s — page HTML saved to %s for inspection. "
+                "Also try running with --no-headless.",
+                MY_COURSES_ALL_URL, debug_path,
+            )
+        except Exception:
+            log.warning("No courses found on %s — try --no-headless to inspect the page.", MY_COURSES_ALL_URL)
     else:
         for s in semesters:
             log.info("Semester: %s — found %d course(s)", s["semester"], len(s["courses"]))
