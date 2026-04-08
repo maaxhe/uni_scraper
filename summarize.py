@@ -201,7 +201,11 @@ def process_course(
         return
 
     if only_files:
-        all_files = [f for f in all_files if f.name in only_files]
+        only_set = set(only_files)
+        all_files = [
+            f for f in all_files
+            if f.name in only_set or str(f.relative_to(course_dir)) in only_set
+        ]
 
     files_to_process = all_files[:limit]
     if len(all_files) > limit:
