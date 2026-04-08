@@ -873,8 +873,8 @@ body {
   font-family: "SF Mono", "JetBrains Mono", monospace; font-size: 12px;
   color: var(--text2); line-height: 1.75; white-space: pre-wrap; word-break: break-word;
 }
-.preview-body.pdf-wrap { padding: 0; overflow: auto; }
-.preview-body.pdf-wrap iframe { border: none; display: block; flex-shrink: 0; }
+.preview-body.pdf-wrap { padding: 0; position: relative; overflow: hidden; }
+.preview-body.pdf-wrap iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: none; }
 /* Block iframe mouse events while a resize is in progress */
 iframe.no-pointer { pointer-events: none; }
 
@@ -1926,7 +1926,7 @@ async function previewFile(filename) {
     ${isPdf ? `
       <div class="zoom-controls">
         <button class="zoom-btn" onclick="changePdfZoom(-25)" title="Verkleinern">−</button>
-        <span class="zoom-label" id="zoom-label">100%</span>
+        <span class="zoom-label" id="zoom-label">Auto</span>
         <button class="zoom-btn" onclick="changePdfZoom(25)" title="Vergrößern">+</button>
       </div>` : ''}
     <a href="/api/file-raw/${enc(activeCourse)}/${enc(filename)}" download title="Herunterladen"
@@ -1936,48 +1936,50 @@ async function previewFile(filename) {
   body.className = 'preview-body';
 
   if (isPdf) {
-    pdfZoom = 100;
+    pdfZoom = 'page-width';
     _pdfBaseSrc = `/api/file-raw/${enc(activeCourse)}/${enc(filename)}`;
     body.className = 'preview-body pdf-wrap';
-    body.innerHTML = `<iframe id="pdf-iframe" src="${_pdfBaseSrc}#zoom=page-width"></iframe>`;
-    // Wait one frame for layout, then size the iframe
-    requestAnimationFrame(() => {
-      applyPdfZoom();
-      // Watch for container resize (panel drag, window resize, fullscreen)
-      if (_pdfRO) _pdfRO.disconnect();
-      _pdfRO = new ResizeObserver(() => {
-        clearTimeout(_pdfROTimer);
-        _pdfROTimer = setTimeout(applyPdfZoom, 80);
-      });
-      _pdfRO.observe(body);
+    // iframe fills container via CSS (position:absolute;inset:0)
+    // #zoom=page-width tells the PDF viewer to fit the page to the iframe width
+    body.innerHTML = `<iframe id="pdf-iframe" src="${_pdfSrcWithZoom('page-width')}"></iframe>`;
+    // On resize: reload after dragging stops (500ms debounce) to refit at new size
+    if (_pdfRO) _pdfRO.disconnect();
+    _pdfRO = new ResizeObserver(() => {
+      if (pdfZoom !== 'page-width') return; // only refit when in auto mode
+      clearTimeout(_pdfROTimer);
+      _pdfROTimer = setTimeout(() => {
+        const iframe = document.getElementById('pdf-iframe');
+        if (iframe) iframe.src = _pdfSrcWithZoom('page-width');
+      }, 500);
     });
+    _pdfRO.observe(body);
   } else {
     const data = await fetch(`/api/file-text/${enc(activeCourse)}/${enc(filename)}`).then(r => r.json());
     body.innerHTML = esc(data.text || '(Kein Text lesbar)');
   }
 }
 
-let pdfZoom = 100;  // percent; 100 = fill container exactly
+let pdfZoom = 'page-width';  // 'page-width' or integer percent
 let _pdfBaseSrc = '';
-let _pdfRO = null;       // ResizeObserver
-let _pdfROTimer = null;  // debounce timer
+let _pdfRO = null;
+let _pdfROTimer = null;
 
-function _pdfWrap() { return document.getElementById('pdf-iframe')?.parentElement; }
+function _pdfSrcWithZoom(z) {
+  return `${_pdfBaseSrc}#zoom=${z}`;
+}
 
 function applyPdfZoom() {
   const iframe = document.getElementById('pdf-iframe');
-  const wrap   = _pdfWrap();
-  if (!iframe || !wrap) return;
-  const scale = pdfZoom / 100;
-  // Set the iframe's pixel dimensions to (container × scale).
-  // The browser PDF viewer re-renders to fill these dimensions — no quality loss.
-  iframe.style.width  = Math.round(wrap.clientWidth  * scale) + 'px';
-  iframe.style.height = Math.round(wrap.clientHeight * scale) + 'px';
+  if (!iframe) return;
+  // Reload the iframe with the chosen zoom — browser PDF viewer renders natively at that zoom.
+  iframe.src = _pdfSrcWithZoom(pdfZoom);
   const label = document.getElementById('zoom-label');
-  if (label) label.textContent = pdfZoom + '%';
+  if (label) label.textContent = pdfZoom === 'page-width' ? 'Auto' : pdfZoom + '%';
 }
 
 function changePdfZoom(delta) {
+  // First click from 'auto': snap to 100 then apply delta
+  if (pdfZoom === 'page-width') pdfZoom = 100;
   pdfZoom = Math.min(300, Math.max(25, pdfZoom + delta));
   applyPdfZoom();
 }
@@ -1991,11 +1993,11 @@ function togglePreviewFullscreen() {
   }
 }
 
-// Update fullscreen button icon; ResizeObserver handles re-dimensioning
+// Update fullscreen button icon; reload PDF after layout settles
 document.addEventListener('fullscreenchange', () => {
   const btn = document.getElementById('fullscreen-btn');
   if (btn) btn.textContent = document.fullscreenElement ? '✕' : '⛶';
-  requestAnimationFrame(applyPdfZoom);
+  setTimeout(applyPdfZoom, 150);
 });
 
 function toggleAllFiles() {
