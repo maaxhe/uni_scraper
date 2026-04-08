@@ -182,8 +182,9 @@ def process_course(
     force: bool,
     only_files: list[str] | None = None,
     lang: str = "en",
+    output_filename: str | None = None,
 ) -> None:
-    output_path = course_dir / OUTPUT_FILENAME
+    output_path = course_dir / (output_filename or OUTPUT_FILENAME)
 
     if output_path.exists() and not force:
         log.info("  ✓ Summary already exists: %s", output_path)
@@ -256,6 +257,7 @@ def main() -> None:
     parser.add_argument("--force", action="store_true", help="Overwrite existing summary")
     parser.add_argument("--files", nargs="+", metavar="FILE", help="Only summarise these files")
     parser.add_argument("--lang", default="en", choices=["en", "de"], help="Summary language (default: en)")
+    parser.add_argument("--out", metavar="FILENAME", default=None, help="Output filename (overrides default _zusammenfassung.md)")
     args = parser.parse_args()
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
@@ -271,14 +273,14 @@ def main() -> None:
             log.error("Directory not found: %s", args.dir)
             sys.exit(1)
         log.info("── Course: %s", course_dir.name)
-        process_course(client, course_dir, args.limit, args.force, only_files=args.files, lang=args.lang)
+        process_course(client, course_dir, args.limit, args.force, only_files=args.files, lang=args.lang, output_filename=args.out)
     elif args.course:
         course_dir = find_course(args.course)
         if not course_dir:
             log.error("No course found for: '%s'", args.course)
             sys.exit(1)
         log.info("── Course: %s", course_dir.name)
-        process_course(client, course_dir, args.limit, args.force, only_files=args.files, lang=args.lang)
+        process_course(client, course_dir, args.limit, args.force, only_files=args.files, lang=args.lang, output_filename=args.out)
     else:
         for course_dir in sorted(COURSES_DIR.iterdir()):
             if course_dir.is_dir():

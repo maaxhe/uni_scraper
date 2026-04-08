@@ -23,6 +23,7 @@ SUMMARIZE_SCRIPT = str(Path(__file__).parent / "summarize.py")
 SCRAPER_SCRIPT   = str(Path(__file__).parent / "scraper.py")
 PIPELINE_LOG     = str(Path(__file__).parent / "pipeline.log")
 OUTPUT_FILENAME  = "_zusammenfassung.md"
+SUMMARY_RE       = re.compile(r'^_zusammenfassung.*\.md$')
 NOTES_FILENAME   = "_notizen.md"
 PROGRESS_FILE    = Path(__file__).parent / "progress.json"
 SUPPORTED_EXT    = {".pdf", ".docx", ".txt", ".md", ".pptx"}
@@ -45,10 +46,24 @@ def save_progress(data: dict):
 # Helpers
 # ---------------------------------------------------------------------------
 
+def list_summaries(d: Path) -> list[dict]:
+    """Return all summary files in d, sorted newest first."""
+    files = sorted(
+        [f for f in d.iterdir() if f.is_file() and SUMMARY_RE.match(f.name)],
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )
+    return [{"name": f.name, "mtime": f.stat().st_mtime} for f in files]
+
+def get_latest_summary(d: Path) -> Path | None:
+    """Return path to the most recently modified summary file, or None."""
+    summaries = list_summaries(d)
+    return (d / summaries[0]["name"]) if summaries else None
+
 def _course_info(rel_path: str, d: Path, progress: dict) -> dict:
     """Build info dict for a single course directory."""
     files = list_files(d)
-    summary_path = d / OUTPUT_FILENAME
+    summary_path = get_latest_summary(d) or (d / OUTPUT_FILENAME)
     notes_path   = d / NOTES_FILENAME
     p = progress.get(rel_path, progress.get(d.name, {}))
     summary_mtime = int(summary_path.stat().st_mtime) if summary_path.exists() else None
@@ -131,7 +146,7 @@ def list_files(course_dir: Path) -> list[str]:
         str(f.relative_to(course_dir)) for f in course_dir.rglob("*")
         if f.is_file()
         and f.suffix.lower() in SUPPORTED_EXT
-        and f.name != OUTPUT_FILENAME
+        and not SUMMARY_RE.match(f.name)
         and f.name != NOTES_FILENAME
         and ".summary" not in f.name
     ])
@@ -230,34 +245,43 @@ def api_file_raw(course_name, filename):
         return "Not found", 404
     return send_file(str(path))
 
+@app.route("/api/summaries/<path:course_name>")
+def api_summaries(course_name):
+    d = COURSES_DIR / course_name
+    return jsonify(list_summaries(d))
+
 @app.route("/api/summary/<path:course_name>")
 def api_summary(course_name):
-    path = COURSES_DIR / course_name / OUTPUT_FILENAME
-    if not path.exists():
+    filename = request.args.get("file")
+    d = COURSES_DIR / course_name
+    path = (d / filename) if filename else get_latest_summary(d)
+    if not path or not path.exists():
         return jsonify({"html": None, "md": None})
     md   = path.read_text(encoding="utf-8")
     html = markdown2.markdown(md, extras=["fenced-code-blocks", "tables"])
-    return jsonify({"html": html, "md": md})
+    return jsonify({"html": html, "md": md, "file": path.name})
 
 @app.route("/api/summary-raw/<path:course_name>")
 def api_summary_raw(course_name):
-    path = COURSES_DIR / course_name / OUTPUT_FILENAME
-    if not path.exists():
+    filename = request.args.get("file")
+    d = COURSES_DIR / course_name
+    path = (d / filename) if filename else get_latest_summary(d)
+    if not path or not path.exists():
         return "Not found", 404
-    return send_file(str(path), as_attachment=True, download_name=f"{course_name}_zusammenfassung.md")
+    return send_file(str(path), as_attachment=True, download_name=f"{course_name}_{path.name}")
 
 @app.route("/api/flashcards/<path:course_name>")
 def api_flashcards(course_name):
-    path = COURSES_DIR / course_name / OUTPUT_FILENAME
-    if not path.exists():
+    path = get_latest_summary(COURSES_DIR / course_name)
+    if not path or not path.exists():
         return jsonify([])
     md    = path.read_text(encoding="utf-8")
     cards = parse_flashcards(md)
     return jsonify(cards)
 
 def _collect_flashcards(rel_path: str, d: Path) -> list:
-    summary = d / OUTPUT_FILENAME
-    if not summary.exists():
+    summary = get_latest_summary(d)
+    if not summary or not summary.exists():
         return []
     md = summary.read_text(encoding="utf-8")
     cards = parse_flashcards(md)
@@ -334,18 +358,22 @@ def api_progress_reset(course_name):
 
 @app.route("/api/summarize", methods=["POST"])
 def api_summarize():
-    data   = request.json
-    course = data.get("course", "")
-    limit  = data.get("limit", 3)
-    force  = data.get("force", False)
-    files  = data.get("files", [])
-    lang   = data.get("lang", "en")
+    data     = request.json
+    course   = data.get("course", "")
+    limit    = data.get("limit", 3)
+    force    = data.get("force", False)
+    files    = data.get("files", [])
+    lang     = data.get("lang", "en")
+    new_file = data.get("new_file", False)
 
     # Resolve to absolute path so nested courses (e.g. "Archiv/Machine Learning") work
     course_dir = COURSES_DIR / course
     cmd = [PYTHON, SUMMARIZE_SCRIPT, "--dir", str(course_dir), "--limit", str(limit), "--lang", lang]
     if force:
         cmd.append("--force")
+    if new_file:
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        cmd += ["--out", f"_zusammenfassung_{ts}.md", "--force"]
     if files:
         cmd += ["--files"] + files
 
@@ -417,8 +445,8 @@ def _search_dir(q: str, rel_path: str, d: Path, results: list):
     hits = []
     source = None
     # Search summary first
-    summary = d / OUTPUT_FILENAME
-    if summary.exists():
+    summary = get_latest_summary(d)
+    if summary and summary.exists():
         md = summary.read_text(encoding="utf-8", errors="replace")
         snips = _snippets(md, q)
         if snips:
@@ -1318,7 +1346,8 @@ body {
                 Max. Dateien: <input class="limit-input" id="limit-input" type="number" value="3" min="1" max="50">
               </div>
               <button class="tbtn btn-blue"  style="width:100%" onclick="generateSummary(false)">Zusammenfassen</button>
-              <button class="tbtn btn-gray"  style="width:100%" onclick="generateSummary(true)">↺ Neu generieren</button>
+              <button class="tbtn btn-gray"  style="width:100%" onclick="generateSummary(false, true)">➕ Weitere erstellen</button>
+              <button class="tbtn btn-gray"  style="width:100%;opacity:.7" onclick="generateSummary(true)">↺ Überschreiben</button>
             </div>
           </div>
           <!-- Files / Preview resize divider -->
@@ -2118,16 +2147,30 @@ function getSelectedFiles() {
 // ═══════════════════════════════════════════════════════════════════════════
 // Summary tab
 // ═══════════════════════════════════════════════════════════════════════════
-async function loadSummary() {
-  const data = await fetch(`/api/summary/${enc(activeCourse)}`).then(r => r.json());
+async function loadSummary(filename = null) {
+  const [summaries, data] = await Promise.all([
+    fetch(`/api/summaries/${enc(activeCourse)}`).then(r => r.json()),
+    fetch(`/api/summary/${enc(activeCourse)}${filename ? '?file=' + enc(filename) : ''}`).then(r => r.json()),
+  ]);
   const el = document.getElementById('summary-body');
   if (data.html) {
+    const activeFile = data.file || '';
+    const pickerHtml = summaries.length > 1 ? `
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+        ${summaries.map(s => {
+          const label = s.name === '_zusammenfassung.md' ? 'Original' : s.name.replace('_zusammenfassung_','').replace('.md','');
+          const active = s.name === activeFile;
+          return `<button class="tbtn ${active ? 'btn-blue' : 'btn-gray'}" style="font-size:11px;padding:4px 10px"
+            onclick="loadSummary('${s.name}')">${label}</button>`;
+        }).join('')}
+      </div>` : '';
     el.innerHTML = `
       <div class="summary-toolbar">
-        <span style="font-size:13px;font-weight:600;color:var(--text2);">Zusammenfassung</span>
-        <div style="flex:1"></div>
+        <div style="flex:1;min-width:0">
+          ${pickerHtml}
+        </div>
         <button class="tbtn btn-gray" onclick="copyToClipboard(summaryMD)" title="Markdown kopieren">📋 Kopieren</button>
-        <a class="tbtn btn-gray" href="/api/summary-raw/${enc(activeCourse)}" download style="text-decoration:none">⬇ Download</a>
+        <a class="tbtn btn-gray" href="/api/summary-raw/${enc(activeCourse)}?file=${enc(activeFile)}" download style="text-decoration:none">⬇ Download</a>
         <button class="tbtn btn-gray" onclick="switchTab('files')">Neu erstellen</button>
       </div>
       <div class="md-content">${data.html}</div>`;
@@ -2143,7 +2186,7 @@ async function loadSummary() {
   }
 }
 
-async function generateSummary(force) {
+async function generateSummary(force, newFile = false) {
   const files = getSelectedFiles();
   const limit = parseInt(document.getElementById('limit-input').value) || 3;
   const lang  = localStorage.getItem('summary_lang') || 'en';
@@ -2153,7 +2196,7 @@ async function generateSummary(force) {
   const res  = await fetch('/api/summarize', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ course: activeCourse, limit, force, files, lang })
+    body: JSON.stringify({ course: activeCourse, limit, force, files, lang, new_file: newFile })
   });
   const data = await res.json();
   logAppend(data.log || '');
@@ -2871,9 +2914,9 @@ def api_chat(course_name):
         return jsonify({"error": "Keine Frage"}), 400
 
     course_dir   = COURSES_DIR / course_name
-    summary_path = course_dir / OUTPUT_FILENAME
+    summary_path = get_latest_summary(course_dir)
     notes_path   = course_dir / NOTES_FILENAME
-    context = summary_path.read_text(encoding="utf-8")[:10000] if summary_path.exists() else ""
+    context = summary_path.read_text(encoding="utf-8")[:10000] if summary_path and summary_path.exists() else ""
     notes   = notes_path.read_text(encoding="utf-8")[:3000]    if notes_path.exists()   else ""
 
     system = f"""Du bist ein präziser Lernassistent für den Kurs „{course_name.split('/')[-1]}". \
