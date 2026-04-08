@@ -303,8 +303,8 @@ async def main() -> None:
     parser.add_argument(
         "--output",
         metavar="DIR",
-        default="/Users/maxmacbookpro/Documents/Uni/Cognitive Science [Course]/Courses",
-        help="Root directory for downloaded files.",
+        default=os.environ.get("COURSES_DIR", "/Users/maxmacbookpro/Documents/Uni/Cognitive Science [Course]/Courses"),
+        help="Root directory for downloaded files (default: $COURSES_DIR env var).",
     )
     parser.add_argument(
         "--headless",
