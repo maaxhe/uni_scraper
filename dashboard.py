@@ -17,7 +17,7 @@ from flask import Flask, jsonify, render_template_string, request, send_file
 
 load_dotenv()
 
-COURSES_DIR      = Path("/Users/maxmacbookpro/Documents/Uni/Cognitive Science [Course]/Courses")
+COURSES_DIR      = Path(os.environ.get("COURSES_DIR", "/Users/maxmacbookpro/Documents/Uni/Cognitive Science [Course]/Courses"))
 PYTHON           = sys.executable
 SUMMARIZE_SCRIPT = str(Path(__file__).parent / "summarize.py")
 SCRAPER_SCRIPT   = str(Path(__file__).parent / "scraper.py")
@@ -429,6 +429,24 @@ def api_scrape():
 def api_pipeline():
     return jsonify(get_pipeline_status())
 
+def _extract_file_text(path: Path) -> str:
+    """Extract plain text from a file for search purposes."""
+    suffix = path.suffix.lower()
+    try:
+        if suffix in {".txt", ".md"}:
+            return path.read_text(encoding="utf-8", errors="replace")
+        elif suffix == ".pdf":
+            import fitz
+            doc = fitz.open(str(path))
+            return "\n".join(page.get_text() for page in doc)
+        elif suffix == ".docx":
+            from docx import Document
+            doc = Document(str(path))
+            return "\n".join(p.text for p in doc.paragraphs)
+    except Exception:
+        pass
+    return ""
+
 def _snippets(text: str, q: str, max_matches: int = 3) -> list[str]:
     matches, start, lower = [], 0, text.lower()
     while True:
@@ -486,6 +504,37 @@ def api_search():
                 _search_dir(q, f"{d.name}/{sd.name}", sd, results)
         else:
             _search_dir(q, d.name, d, results)
+    return jsonify(results)
+
+@app.route("/api/search-files")
+def api_search_files():
+    """Full-text search inside actual course files (PDFs, DOCX, TXT, MD)."""
+    q = request.args.get("q", "").lower().strip()
+    if len(q) < 2:
+        return jsonify([])
+    results = []
+    for d in sorted(COURSES_DIR.iterdir()):
+        if not d.is_dir():
+            continue
+        sub_dirs = [sd for sd in d.iterdir() if sd.is_dir() and not sd.name.startswith('.')]
+        dirs = [(f"{d.name}/{sd.name}", sd) for sd in sorted(sub_dirs)] if len(sub_dirs) >= 2 else [(d.name, d)]
+        for rel, course_dir in dirs:
+            files = [
+                f for f in course_dir.rglob("*")
+                if f.is_file() and f.suffix.lower() in {".pdf", ".docx", ".txt", ".md"}
+                and not SUMMARY_RE.match(f.name) and f.name != NOTES_FILENAME
+            ]
+            for f in files[:20]:  # cap per course to avoid timeouts
+                text = _extract_file_text(f)
+                if not text:
+                    continue
+                snips = _snippets(text, q, max_matches=2)
+                if snips:
+                    results.append({
+                        "course": rel, "name": course_dir.name,
+                        "file": f.name, "snippet": snips[0], "count": len(snips),
+                        "source": "file",
+                    })
     return jsonify(results)
 
 # ---------------------------------------------------------------------------
@@ -764,6 +813,32 @@ body {
   border-right: none;
 }
 #sidebar.collapsed + .resize-divider { display: none; }
+
+/* ── Mobile sidebar overlay ── */
+#sidebar-backdrop {
+  display: none; position: fixed; inset: 0; top: 54px;
+  background: rgba(0,0,0,.55); z-index: 199;
+  opacity: 0; pointer-events: none;
+  transition: opacity .25s;
+}
+#sidebar-backdrop.visible { opacity: 1; pointer-events: auto; }
+
+@media (max-width: 768px) {
+  #sidebar {
+    position: fixed; top: 54px; left: 0; bottom: 0; z-index: 200;
+    width: 280px !important; min-width: 280px !important;
+    transform: translateX(-100%);
+    transition: transform .25s ease, box-shadow .25s;
+    border-right: 1px solid var(--border);
+  }
+  #sidebar.mobile-open {
+    transform: translateX(0);
+    box-shadow: 4px 0 24px rgba(0,0,0,.6);
+  }
+  #sidebar.collapsed { transform: translateX(-100%); width: 280px !important; }
+  .resize-divider#divider-sidebar { display: none; }
+  #sidebar-backdrop { display: block; }
+}
 
 /* ── Main ── */
 #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
@@ -1272,6 +1347,9 @@ body {
   <button class="tbtn btn-gray topbar-shortcuts" onclick="showShortcuts()" title="Tastenkürzel anzeigen (?)">⌨️</button>
   <button class="tbtn btn-blue" id="scrape-btn" onclick="runScraper()">↓<span class="tbtn-label"> Neue Dateien</span></button>
 </div>
+
+<!-- Mobile sidebar backdrop -->
+<div id="sidebar-backdrop" onclick="toggleSidebar()"></div>
 
 <!-- Layout -->
 <div id="layout">
@@ -1974,6 +2052,7 @@ async function previewFile(filename) {
   header.innerHTML = `
     <span class="preview-header-name">${esc(filename)}</span>
     ${isPdf ? `
+      <span id="pdf-page-ind" style="font-size:11px;color:var(--text3);flex-shrink:0"></span>
       <div class="zoom-controls">
         <button class="zoom-btn" onclick="changePdfZoom(-20)" title="Verkleinern">−</button>
         <span class="zoom-label" id="zoom-label">Auto</span>
@@ -2067,6 +2146,23 @@ async function _renderPdf(container) {
 
   if (gen !== _pdfGen) return;
   _updateZoomLabel(container, scale);
+  _setupPdfPageIndicator(container);
+}
+
+let _pdfPageObserver = null;
+function _setupPdfPageIndicator(container) {
+  if (_pdfPageObserver) _pdfPageObserver.disconnect();
+  const ind = document.getElementById('pdf-page-ind');
+  if (!ind || !_pdfDoc) return;
+  const canvases = [...container.querySelectorAll('.pdf-page-canvas')];
+  ind.textContent = `1 / ${canvases.length}`;
+  _pdfPageObserver = new IntersectionObserver(entries => {
+    const best = entries
+      .filter(e => e.isIntersecting)
+      .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+    if (best) ind.textContent = `${canvases.indexOf(best.target) + 1} / ${canvases.length}`;
+  }, { root: container, threshold: [0.1, 0.5] });
+  canvases.forEach(c => _pdfPageObserver.observe(c));
 }
 
 function _updateZoomLabel(container, scale) {
@@ -2744,29 +2840,56 @@ function handleGlobalSearch(e) {
   searchTimer = setTimeout(() => doSearch(q), 300);
 }
 
-async function doSearch(q) {
-  showPanel('search');
-  document.getElementById('tabs').style.display = 'none';
-  const results = await fetch(`/api/search?q=${encodeURIComponent(q)}`).then(r => r.json());
-  const el = document.getElementById('search-results-body');
-  if (!results.length) {
-    el.innerHTML = `<div class="search-empty">Keine Ergebnisse für „${esc(q)}"</div>`;
-    return;
-  }
+function _renderSearchResults(results, q, el, showFileSearchBtn = true) {
   const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const highlighted = results.map(r => {
+  const SOURCE_LABEL = {
+    summary: 'Zusammenfassung', notes: 'Notizen', both: 'Zusammenfassung + Notizen', file: 'Dateiinhalt',
+  };
+  const SOURCE_CLASS = { summary: 'summary', notes: 'notes', both: 'both', file: 'summary' };
+  const rows = results.map(r => {
     const snippet = r.snippet.replace(new RegExp(escaped, 'gi'), m => `<mark>${m}</mark>`);
+    const tab = r.source === 'notes' ? 'notes' : r.source === 'file' ? 'files' : 'summary';
+    const fileTag = r.file ? `<span style="font-size:10px;color:var(--text3);margin-left:4px">${esc(r.file)}</span>` : '';
     return `
-      <div class="search-result" data-course="${esc(r.course)}" onclick="selectCourseFromEl(this);switchTab(r.source==='notes'?'notes':'summary')">
+      <div class="search-result" data-course="${esc(r.course)}" onclick="selectCourseFromEl(this);switchTab('${tab}')">
         <div class="search-result-course">
-          ${esc(r.name || r.course)}
+          ${esc(r.name || r.course)}${fileTag}
           ${r.count > 1 ? `<span class="search-result-count">${r.count} Treffer</span>` : ''}
-          ${r.source ? `<span class="search-source search-source-${r.source}">${r.source==='both'?'Zusammenfassung + Notizen':r.source==='notes'?'Notizen':'Zusammenfassung'}</span>` : ''}
+          ${r.source ? `<span class="search-source search-source-${SOURCE_CLASS[r.source]||'summary'}">${SOURCE_LABEL[r.source]||r.source}</span>` : ''}
         </div>
         <div class="search-result-snippet">…${snippet}…</div>
       </div>`;
   }).join('');
-  el.innerHTML = `<div class="search-results-header">${results.length} Kurse mit Treffern für „${esc(q)}"</div>${highlighted}`;
+  const fileBtn = showFileSearchBtn
+    ? `<button class="tbtn btn-gray" style="font-size:11px;padding:4px 10px" onclick="doFileSearch(${JSON.stringify(q)})">📄 In Dateien suchen</button>`
+    : `<span style="font-size:11px;color:var(--text3)">inkl. Dateiinhalte</span>`;
+  el.innerHTML = `
+    <div class="search-results-header" style="display:flex;align-items:center;gap:10px">
+      <span>${results.length} Treffer für „${esc(q)}"</span>
+      <div style="flex:1"></div>
+      ${fileBtn}
+    </div>${rows || `<div class="search-empty">Keine Treffer in Zusammenfassungen/Notizen</div>`}`;
+}
+
+async function doSearch(q) {
+  showPanel('search');
+  document.getElementById('tabs').style.display = 'none';
+  const el = document.getElementById('search-results-body');
+  el.innerHTML = '<div class="search-empty">Suche…</div>';
+  const results = await fetch(`/api/search?q=${encodeURIComponent(q)}`).then(r => r.json());
+  _renderSearchResults(results, q, el);
+}
+
+async function doFileSearch(q) {
+  const el = document.getElementById('search-results-body');
+  el.innerHTML = '<div class="search-empty">Durchsuche Dateiinhalte (kann einen Moment dauern)…</div>';
+  const [sumResults, fileResults] = await Promise.all([
+    fetch(`/api/search?q=${encodeURIComponent(q)}`).then(r => r.json()),
+    fetch(`/api/search-files?q=${encodeURIComponent(q)}`).then(r => r.json()),
+  ]);
+  const seen = new Set(sumResults.map(r => r.course));
+  const combined = [...sumResults, ...fileResults.filter(r => !seen.has(r.course))];
+  _renderSearchResults(combined, q, el, false);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2794,10 +2917,18 @@ async function runScraper() {
 // Resizable dividers
 // ═══════════════════════════════════════════════════════════════════════════
 function toggleSidebar() {
-  const sb = document.getElementById('sidebar');
-  const collapsed = sb.classList.toggle('collapsed');
-  localStorage.setItem('sidebar_collapsed', collapsed ? '1' : '');
-  document.getElementById('sidebar-toggle').textContent = collapsed ? '▶' : '☰';
+  const sb  = document.getElementById('sidebar');
+  const bd  = document.getElementById('sidebar-backdrop');
+  const btn = document.getElementById('sidebar-toggle');
+  if (window.innerWidth <= 768) {
+    const open = sb.classList.toggle('mobile-open');
+    bd.classList.toggle('visible', open);
+    btn.textContent = open ? '✕' : '☰';
+  } else {
+    const collapsed = sb.classList.toggle('collapsed');
+    localStorage.setItem('sidebar_collapsed', collapsed ? '1' : '');
+    btn.textContent = collapsed ? '▶' : '☰';
+  }
 }
 
 function initResizeDividers() {

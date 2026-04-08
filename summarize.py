@@ -25,9 +25,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-COURSES_DIR = Path("/Users/maxmacbookpro/Documents/Uni/Cognitive Science [Course]/Courses")
+COURSES_DIR = Path(os.environ.get("COURSES_DIR", "/Users/maxmacbookpro/Documents/Uni/Cognitive Science [Course]/Courses"))
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".pptx"}
-MAX_CHARS = 10_000
+MAX_CHARS = 40_000
 MODEL = "claude-opus-4-6"
 OUTPUT_FILENAME = "_zusammenfassung.md"
 
@@ -146,11 +146,18 @@ Use this exact structure for each file (all bullet points, no prose):
 
 Files:{files_block}"""
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=4000,
-        messages=[{"role": "user", "content": prompt}],
-    )
+    try:
+        response = client.messages.create(
+            model=MODEL,
+            max_tokens=4000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except anthropic.AuthenticationError:
+        log.error("ANTHROPIC_API_KEY ungültig – neuen Key unter https://console.anthropic.com erstellen.")
+        sys.exit(1)
+    except anthropic.APIConnectionError:
+        log.error("Verbindung zur Anthropic API fehlgeschlagen – Internetverbindung prüfen.")
+        sys.exit(1)
     return response.content[0].text
 
 
