@@ -146,53 +146,61 @@ async def get_all_semester_courses(page: Page) -> list[dict]:
     Uses Playwright's native locator API (more reliable than page.evaluate
     for pages that render links inside iframes or shadow DOM).
     """
-    await page.goto(MY_COURSES_ALL_URL, wait_until="networkidle")
-    await page.wait_for_timeout(1500)
+    # MY_COURSES_ALL_URL (?sem_select=all) acts as a redirect/settings call
+    # and returns an empty shell page without the course list.
+    # Scrape the regular my_courses page + the archive page instead.
+    pages_to_scrape = [
+        MY_COURSES_URL,
+        f"{STUDIP_BASE}/dispatch.php/my_courses/archive",
+    ]
 
-    SEMESTER_RE = re.compile(r'(?:SoSe|WiSe|SS|WS|Sommer|Winter)\s*\d{2}', re.IGNORECASE)
-    SKIP_URL    = re.compile(r'wizard|logout|login|profile/|messages|calendar|settings|globalsearch|jsupdater|my_institutes|my_courses/store|my_courses/groups|my_courses/archive|tabularasa', re.IGNORECASE)
-    COURSE_URL  = re.compile(r'seminar_main\.php\?auswahl=|dispatch\.php/course/(?!wizard)|auswahl=[a-f0-9]{10}', re.IGNORECASE)
-
-    # Use Playwright's native locator to read all <a> elements reliably.
-    all_anchors = await page.locator('a[href]').all()
+    SKIP_URL   = re.compile(r'wizard|logout|login|profile/|messages|calendar|settings|globalsearch|jsupdater|my_institutes|my_courses/store|my_courses/groups|tabularasa|mark_notification', re.IGNORECASE)
+    COURSE_URL = re.compile(r'seminar_main\.php\?auswahl=|auswahl=[a-f0-9]{10}', re.IGNORECASE)
 
     course_links: list[dict] = []
     seen_urls: set[str] = set()
-    for anchor in all_anchors:
-        try:
-            href = (await anchor.get_attribute('href') or '').strip()
-            name = (await anchor.text_content() or '').strip()
-        except Exception:
-            continue
-        if not href or not name:
-            continue
-        # Resolve relative URLs
-        if href.startswith('/'):
-            href = STUDIP_BASE + href
-        elif not href.startswith('http'):
-            continue
-        if SKIP_URL.search(href):
-            continue
-        if not COURSE_URL.search(href):
-            continue
-        # Normalise to just auswahl= URL to deduplicate tabs for the same course
-        norm = re.sub(r'&(?:amp;)?redirect_to=[^&]*', '', href)
-        if norm in seen_urls:
-            continue
-        seen_urls.add(norm)
-        course_links.append({"name": name, "url": norm})
+
+    for url in pages_to_scrape:
+        await page.goto(url, wait_until="networkidle")
+        await page.wait_for_timeout(1000)
+        all_anchors = await page.locator('a[href]').all()
+        log.info("Scanning %s — %d anchors found", url, len(all_anchors))
+
+        for anchor in all_anchors:
+            try:
+                href = (await anchor.get_attribute('href') or '').strip()
+                name = (await anchor.text_content() or '').strip()
+            except Exception:
+                continue
+            if not href or not name:
+                continue
+            if href.startswith('/'):
+                href = STUDIP_BASE + href
+            elif not href.startswith('http'):
+                continue
+            if SKIP_URL.search(href):
+                continue
+            if not COURSE_URL.search(href):
+                continue
+            # Strip redirect_to= params — same course appears with multiple tab links
+            norm = re.sub(r'&(?:amp;)?redirect_to=[^&]*', '', href)
+            if norm in seen_urls:
+                continue
+            seen_urls.add(norm)
+            course_links.append({"name": name, "url": norm})
 
     if not course_links:
         debug_path = Path(__file__).parent / "debug_page.html"
         try:
+            await page.goto(MY_COURSES_URL, wait_until="networkidle")
             debug_path.write_text(await page.content(), encoding="utf-8")
             log.warning("No courses found — page HTML saved to %s", debug_path)
         except Exception:
             pass
-        log.warning("No courses found on %s — try --no-headless.", MY_COURSES_ALL_URL)
+        log.warning("No courses found — try --no-headless to inspect the page.")
         return []
 
-    log.info("Found %d course link(s) total", len(course_links))
+    log.info("Found %d course(s) total", len(course_links))
     return [{"semester": "Alle Kurse", "courses": course_links}]
 
 
