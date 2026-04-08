@@ -875,6 +875,16 @@ body {
 }
 .preview-body.pdf-wrap { padding: 0; }
 .preview-body iframe { width: 100%; height: 100%; border: none; }
+
+/* Fullscreen */
+.preview-box:fullscreen { border-radius: 0; }
+.preview-box:fullscreen .preview-body { height: calc(100vh - 45px); }
+.preview-box:-webkit-full-screen { border-radius: 0; }
+.preview-box:-webkit-full-screen .preview-body { height: calc(100vh - 45px); }
+#fullscreen-btn { background: none; border: none; cursor: pointer; font-size: 15px;
+  color: var(--text3); padding: 2px 5px; border-radius: 5px; line-height: 1;
+  transition: color var(--transition), background var(--transition); }
+#fullscreen-btn:hover { color: var(--text); background: var(--bg4); }
 .preview-placeholder {
   height: 100%; display: flex; align-items: center; justify-content: center;
   flex-direction: column; gap: 10px; color: var(--text3);
@@ -1898,7 +1908,8 @@ async function previewFile(filename) {
   header.innerHTML = `
     <span class="preview-header-name">${esc(filename)}</span>
     <a href="/api/file-raw/${enc(activeCourse)}/${enc(filename)}" download title="Herunterladen"
-       style="color:var(--text3);font-size:13px;text-decoration:none" onclick="event.stopPropagation()">⬇</a>`;
+       style="color:var(--text3);font-size:13px;text-decoration:none" onclick="event.stopPropagation()">⬇</a>
+    ${ext === 'pdf' ? `<button id="fullscreen-btn" onclick="togglePreviewFullscreen()" title="Vollbild (F)">⛶</button>` : ''}`;
   body.innerHTML = '<div class="preview-placeholder"><div class="icon">⏳</div><div>Lade…</div></div>';
   body.className = 'preview-body';
 
@@ -1910,6 +1921,21 @@ async function previewFile(filename) {
     body.innerHTML = esc(data.text || '(Kein Text lesbar)');
   }
 }
+
+function togglePreviewFullscreen() {
+  const box = document.querySelector('.preview-box');
+  if (!document.fullscreenElement) {
+    (box.requestFullscreen || box.webkitRequestFullscreen).call(box);
+  } else {
+    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+  }
+}
+
+// Update fullscreen button icon when state changes via Esc etc.
+document.addEventListener('fullscreenchange', () => {
+  const btn = document.getElementById('fullscreen-btn');
+  if (btn) btn.textContent = document.fullscreenElement ? '✕' : '⛶';
+});
 
 function toggleAllFiles() {
   allFilesChecked = !allFilesChecked;
@@ -2247,6 +2273,10 @@ document.addEventListener('keydown', e => {
 
   if (e.key === 'b' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
     toggleSidebar(); return;
+  }
+
+  if (e.key === 'f' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
+    if (document.getElementById('fullscreen-btn')) { togglePreviewFullscreen(); return; }
   }
 
   // Ctrl+K → focus search
