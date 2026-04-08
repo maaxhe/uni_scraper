@@ -1955,91 +1955,107 @@ async function previewFile(filename) {
 }
 
 // ── PDF.js state ─────────────────────────────────────────────────────────
-let _pdfUrl   = '';
-let _pdfScale = null;   // null = auto-fit to container width
-let _pdfDoc   = null;
-let _pdfRO    = null, _pdfROTimer = null;
-let _pdfRendering = false;
+let _pdfUrl      = '';
+let _pdfScale    = null;  // null = auto-fit to container width
+let _pdfDoc      = null;
+let _pdfRO       = null, _pdfROTimer = null;
+let _pdfGen      = 0;    // generation counter — incremented on every new render request
+
+// Returns the scale that fills the container width exactly.
+function _pdfAutoScale(container) {
+  if (!_pdfDoc) return 1;
+  // Use cached viewport from first page (already fetched as _pdfPage1Vp)
+  const w = container.clientWidth - 16;
+  return w > 0 ? w / _pdfPage1Width : 1;
+}
+let _pdfPage1Width = 0; // natural width of page 1 at scale=1
 
 async function _loadPdfJs(container) {
   if (_pdfDoc) { _pdfDoc.destroy(); _pdfDoc = null; }
   try {
     _pdfDoc = await pdfjsLib.getDocument(_pdfUrl).promise;
   } catch(e) {
-    container.innerHTML = `<div style="color:var(--red);padding:20px">PDF konnte nicht geladen werden: ${e.message}</div>`;
+    container.innerHTML = `<div style="color:var(--red);padding:20px">Fehler: ${e.message}</div>`;
     return;
   }
-  await _renderAllPages(container);
+  // Cache page-1 natural width so _pdfAutoScale() doesn't need to be async.
+  const p1 = await _pdfDoc.getPage(1);
+  _pdfPage1Width = p1.getViewport({ scale: 1 }).width;
+
+  // Wait for the browser to finish laying out the container so clientWidth is real.
+  await new Promise(r => requestAnimationFrame(r));
+  await new Promise(r => requestAnimationFrame(r)); // two frames to be sure
+
+  await _renderPdf(container);
 }
 
-async function _renderAllPages(container) {
-  if (_pdfRendering || !_pdfDoc) return;
-  _pdfRendering = true;
-  container.innerHTML = '';
-  const containerWidth = container.clientWidth || 600;
+async function _renderPdf(container) {
+  if (!_pdfDoc) return;
+  const gen = ++_pdfGen; // any concurrent render with a smaller gen is stale
+
+  const containerWidth = container.clientWidth;
+  if (!containerWidth) return;
+  const scale = _pdfScale !== null ? _pdfScale : _pdfAutoScale(container);
+
+  // Collect all page objects first (fast, no rendering yet)
+  const pages = [];
   for (let i = 1; i <= _pdfDoc.numPages; i++) {
-    const page = await _pdfDoc.getPage(i);
-    const viewport0 = page.getViewport({ scale: 1 });
-    const scale = _pdfScale !== null ? _pdfScale : (containerWidth - 16) / viewport0.width;
+    pages.push(await _pdfDoc.getPage(i));
+  }
+  if (gen !== _pdfGen) return; // superseded
+
+  container.innerHTML = ''; // clear old canvases only right before we paint new ones
+
+  for (const page of pages) {
+    if (gen !== _pdfGen) return; // superseded mid-render
     const viewport = page.getViewport({ scale });
-    const canvas = document.createElement('canvas');
+    const canvas   = document.createElement('canvas');
     canvas.className = 'pdf-page-canvas';
-    canvas.width  = viewport.width;
-    canvas.height = viewport.height;
+    canvas.width     = viewport.width;
+    canvas.height    = viewport.height;
     container.appendChild(canvas);
     await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
   }
-  _updateZoomLabel();
-  _pdfRendering = false;
+
+  if (gen !== _pdfGen) return;
+  _updateZoomLabel(container, scale);
 }
 
-function _updateZoomLabel() {
+function _updateZoomLabel(container, scale) {
   const label = document.getElementById('zoom-label');
-  if (!label || !_pdfDoc) return;
+  if (!label) return;
   if (_pdfScale === null) {
     label.textContent = 'Auto';
   } else {
-    // compute percent relative to first page natural width
-    _pdfDoc.getPage(1).then(p => {
-      const vp0 = p.getViewport({ scale: 1 });
-      const containerWidth = document.getElementById('preview-body').clientWidth || 600;
-      const autoScale = (containerWidth - 16) / vp0.width;
-      const pct = Math.round((_pdfScale / autoScale) * 100);
-      label.textContent = pct + '%';
-    });
+    const autoScale = _pdfAutoScale(container);
+    label.textContent = Math.round((scale / autoScale) * 100) + '%';
   }
 }
 
 function applyPdfZoom() {
   const body = document.getElementById('preview-body');
   if (!body || !_pdfDoc) return;
-  _renderAllPages(body);
+  _renderPdf(body);
 }
 
 function changePdfZoom(delta) {
   const body = document.getElementById('preview-body');
   if (!body || !_pdfDoc) return;
-  if (_pdfScale === null) {
-    // initialise from auto scale
-    _pdfDoc.getPage(1).then(p => {
-      const vp0 = p.getViewport({ scale: 1 });
-      const containerWidth = body.clientWidth || 600;
-      _pdfScale = (containerWidth - 16) / vp0.width;
-      _pdfScale = Math.min(5, Math.max(0.25, _pdfScale * (1 + delta / 100)));
-      _renderAllPages(body);
-    });
-    return;
-  }
-  _pdfScale = Math.min(5, Math.max(0.25, _pdfScale * (1 + delta / 100)));
-  _renderAllPages(body);
+  // Resolve current scale (auto → actual number) before applying delta
+  const current = _pdfScale !== null ? _pdfScale : _pdfAutoScale(body);
+  _pdfScale = Math.min(5, Math.max(0.1, current * (1 + delta / 100)));
+  _renderPdf(body);
 }
 
 function _setupPdfResizeObserver(body) {
   if (_pdfRO) _pdfRO.disconnect();
   _pdfRO = new ResizeObserver(() => {
-    if (_pdfScale !== null) return; // only auto-fit
+    if (_pdfScale !== null) return; // manual zoom active — don't clobber it
     clearTimeout(_pdfROTimer);
-    _pdfROTimer = setTimeout(() => _renderAllPages(body), 200);
+    _pdfROTimer = setTimeout(() => {
+      const b = document.getElementById('preview-body');
+      if (b && _pdfDoc) _renderPdf(b);
+    }, 150);
   });
   _pdfRO.observe(body);
 }
