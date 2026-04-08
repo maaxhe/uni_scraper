@@ -1923,6 +1923,7 @@ function switchTab(tab) {
   activeTab = tab;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   showPanel(tab);
+  if (tab === 'files') _updateSummarizeBtn();
 
   if (tab === 'summary') loadSummary();
   if (tab === 'learn')   loadFlashcards();
@@ -2282,7 +2283,30 @@ async function loadSummary(filename = null) {
   }
 }
 
+function _updateSummarizeBtn() {
+  const course = allCourses.find(c => c.path === activeCourse);
+  const btn = document.querySelector('[onclick="generateSummary(false)"]');
+  if (!btn) return;
+  if (course?.has_summary) {
+    btn.textContent = '→ Zur Zusammenfassung';
+    btn.className = 'tbtn btn-gray';
+    btn.style.width = '100%';
+    btn.onclick = () => switchTab('summary');
+  } else {
+    btn.textContent = 'Zusammenfassen';
+    btn.className = 'tbtn btn-blue';
+    btn.style.width = '100%';
+    btn.onclick = () => generateSummary(false);
+  }
+}
+
 async function generateSummary(force, newFile = false) {
+  const course = allCourses.find(c => c.path === activeCourse);
+  // "Zusammenfassen" (force=false, newFile=false) with existing summary → do nothing
+  if (!force && !newFile && course?.has_summary) {
+    toast('Zusammenfassung bereits vorhanden — nutze "➕ Weitere" oder "↺ Überschreiben".', '');
+    return;
+  }
   const files = getSelectedFiles();
   const limit = parseInt(document.getElementById('limit-input').value) || 3;
   const lang  = localStorage.getItem('summary_lang') || 'en';
@@ -2303,6 +2327,7 @@ async function generateSummary(force, newFile = false) {
     courseTree = await fetch('/api/courses').then(r => r.json());
     allCourses = flattenTree(courseTree);
     filterAndRenderSidebar();
+    _updateSummarizeBtn();
     switchTab('summary');
     toast('Zusammenfassung erstellt!', 'ok');
   } else {
