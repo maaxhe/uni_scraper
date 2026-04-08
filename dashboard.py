@@ -2062,7 +2062,7 @@ function _setupPdfResizeObserver(body) {
 
 function _setupPdfWheelZoom(body) {
   body.addEventListener('wheel', e => {
-    if (!_pdfDoc) return;
+    if (!_pdfDoc || !e.ctrlKey) return; // only intercept pinch-to-zoom (ctrlKey = true on macOS trackpad pinch)
     e.preventDefault();
     changePdfZoom(e.deltaY < 0 ? 15 : -15);
   }, { passive: false });
