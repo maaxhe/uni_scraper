@@ -873,8 +873,8 @@ body {
   font-family: "SF Mono", "JetBrains Mono", monospace; font-size: 12px;
   color: var(--text2); line-height: 1.75; white-space: pre-wrap; word-break: break-word;
 }
-.preview-body.pdf-wrap { padding: 0; position: relative; overflow: hidden; }
-.preview-body.pdf-wrap iframe { position: absolute; inset: 0; border: none; width: 100%; height: 100%; }
+.preview-body.pdf-wrap { padding: 0; overflow: auto; }
+.preview-body.pdf-wrap iframe { border: none; display: block; flex-shrink: 0; }
 /* Block iframe mouse events while a resize is in progress */
 iframe.no-pointer { pointer-events: none; }
 
@@ -1936,33 +1936,48 @@ async function previewFile(filename) {
   body.className = 'preview-body';
 
   if (isPdf) {
-    pdfZoom = 'auto';
+    pdfZoom = 100;
     _pdfBaseSrc = `/api/file-raw/${enc(activeCourse)}/${enc(filename)}`;
     body.className = 'preview-body pdf-wrap';
-    body.innerHTML = `<iframe id="pdf-iframe" src="${_pdfSrc()}"></iframe>`;
+    body.innerHTML = `<iframe id="pdf-iframe" src="${_pdfBaseSrc}#zoom=page-width"></iframe>`;
+    // Wait one frame for layout, then size the iframe
+    requestAnimationFrame(() => {
+      applyPdfZoom();
+      // Watch for container resize (panel drag, window resize, fullscreen)
+      if (_pdfRO) _pdfRO.disconnect();
+      _pdfRO = new ResizeObserver(() => {
+        clearTimeout(_pdfROTimer);
+        _pdfROTimer = setTimeout(applyPdfZoom, 80);
+      });
+      _pdfRO.observe(body);
+    });
   } else {
     const data = await fetch(`/api/file-text/${enc(activeCourse)}/${enc(filename)}`).then(r => r.json());
     body.innerHTML = esc(data.text || '(Kein Text lesbar)');
   }
 }
 
-let pdfZoom = 'auto';  // 'auto' = page-width, or integer percent
+let pdfZoom = 100;  // percent; 100 = fill container exactly
 let _pdfBaseSrc = '';
+let _pdfRO = null;       // ResizeObserver
+let _pdfROTimer = null;  // debounce timer
 
-function _pdfSrc() {
-  return `${_pdfBaseSrc}#zoom=${pdfZoom === 'auto' ? 'page-width' : pdfZoom}`;
-}
+function _pdfWrap() { return document.getElementById('pdf-iframe')?.parentElement; }
 
 function applyPdfZoom() {
   const iframe = document.getElementById('pdf-iframe');
-  if (!iframe) return;
-  iframe.src = _pdfSrc();
+  const wrap   = _pdfWrap();
+  if (!iframe || !wrap) return;
+  const scale = pdfZoom / 100;
+  // Set the iframe's pixel dimensions to (container × scale).
+  // The browser PDF viewer re-renders to fill these dimensions — no quality loss.
+  iframe.style.width  = Math.round(wrap.clientWidth  * scale) + 'px';
+  iframe.style.height = Math.round(wrap.clientHeight * scale) + 'px';
   const label = document.getElementById('zoom-label');
-  if (label) label.textContent = pdfZoom === 'auto' ? 'Auto' : pdfZoom + '%';
+  if (label) label.textContent = pdfZoom + '%';
 }
 
 function changePdfZoom(delta) {
-  if (pdfZoom === 'auto') pdfZoom = 100;
   pdfZoom = Math.min(300, Math.max(25, pdfZoom + delta));
   applyPdfZoom();
 }
@@ -1976,10 +1991,11 @@ function togglePreviewFullscreen() {
   }
 }
 
-// Update fullscreen button icon; auto-refit handled by ResizeObserver
+// Update fullscreen button icon; ResizeObserver handles re-dimensioning
 document.addEventListener('fullscreenchange', () => {
   const btn = document.getElementById('fullscreen-btn');
   if (btn) btn.textContent = document.fullscreenElement ? '✕' : '⛶';
+  requestAnimationFrame(applyPdfZoom);
 });
 
 function toggleAllFiles() {

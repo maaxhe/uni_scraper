@@ -74,25 +74,33 @@ def extract_text(path: Path) -> str:
 
 PROMPTS = {
     "en": {
-        "intro": "You are a study assistant for university students.\n\nCourse: {course_name}\n\nI'm giving you {n} file(s) from this course. Create a structured study guide in English.",
+        "intro": (
+            "You are a concise study assistant for university students.\n\n"
+            "Course: {course_name}\n\n"
+            "I'm giving you {n} file(s). For each file produce a SHORT study note "
+            "using ONLY bullet points — no prose paragraphs. Be dense and direct."
+        ),
         "section": "## [Filename]",
-        "summary_label": "**Summary** (3-5 sentences)",
+        "summary_label": "**Summary** (3–5 bullets, one idea each)",
         "concepts_label": "**Key Concepts**",
         "questions_label": "**Training Questions**",
         "answers_label": "**Answers**",
-        "followup_label": "**Further Topics**",
         "header": "# Summary: {name}\n\n*Generated on {date}*  \n*{n} of {total} file(s) summarised*\n\n---\n\n",
         "truncated": "\n\n[... text truncated ...]",
         "file_label": "### File {i}: {name}",
     },
     "de": {
-        "intro": "Du bist ein Lernassistent für Studierende.\n\nKurs: {course_name}\n\nIch gebe dir {n} Datei(en) aus diesem Kurs. Erstelle daraus ein strukturiertes Lernheft auf Deutsch.",
+        "intro": (
+            "Du bist ein prägnanter Lernassistent für Studierende.\n\n"
+            "Kurs: {course_name}\n\n"
+            "Ich gebe dir {n} Datei(en). Erstelle für jede Datei eine KURZE Lernnotiz "
+            "ausschließlich in Stichpunkten — keine Fließtextabsätze. Knapp und präzise."
+        ),
         "section": "## [Dateiname]",
-        "summary_label": "**Zusammenfassung** (3-5 Sätze)",
+        "summary_label": "**Zusammenfassung** (3–5 Bullets, je eine Kernaussage)",
         "concepts_label": "**Kernkonzepte**",
         "questions_label": "**Trainingsfragen**",
         "answers_label": "**Antworten**",
-        "followup_label": "**Weiterführende Themen**",
         "header": "# Zusammenfassung: {name}\n\n*Generiert am {date}*  \n*{n} von {total} Datei(en) zusammengefasst*\n\n---\n\n",
         "truncated": "\n\n[... Text gekürzt ...]",
         "file_label": "### Datei {i}: {name}",
@@ -112,33 +120,27 @@ def summarize_files(client: anthropic.Anthropic, course_name: str, files: list[d
 
     prompt = f"""{p['intro'].format(course_name=course_name, n=len(files))}
 
-For each file create a section:
+Use this exact structure for each file (all bullet points, no prose):
 
 {p['section']}
 
 {p['summary_label']}
+- ...
+- ...
 
 {p['concepts_label']}
-- Concept 1: short explanation
-- Concept 2: short explanation
-- ...
+- **Term**: one-line definition
+- **Term**: one-line definition
 
 {p['questions_label']}
 1. Question?
 2. Question?
 3. Question?
-4. Question?
-5. Question?
 
 {p['answers_label']}
-1. Answer
-2. Answer
-...
-
-{p['followup_label']}
-- Topic 1 — why interesting
-- Topic 2 — why interesting
-- Topic 3 — why interesting
+1. Answer (one sentence)
+2. Answer (one sentence)
+3. Answer (one sentence)
 
 ---
 
