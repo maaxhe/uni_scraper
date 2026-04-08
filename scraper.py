@@ -145,20 +145,18 @@ async def get_all_semester_courses(page: Page) -> list[dict]:
     Parse the my_courses overview and return a list of semester dicts:
         [{"semester": "SoSe 2026", "courses": [{"name": ..., "url": ...}, ...]}, ...]
 
-    All semesters visible on the page are returned, newest first.
-
-    DOM structure on studip.uni-osnabrueck.de (2025/26):
-      <table>
-        <caption>SoSe 2026</caption>
-        <tbody>
-          <tr>
-            <td><a href="seminar_main.php?auswahl=<id>">Course Name</a></td>
-            ...
+    Strategy A: look for <caption> elements whose text matches a semester pattern.
+    Strategy B (fallback): group all seminar_main.php links by their nearest
+                           heading/section ancestor, or collect as one group.
     """
     await page.goto(MY_COURSES_ALL_URL, wait_until="networkidle")
+    # Extra wait — some Stud.IP installs render course tables via JS after load.
+    await page.wait_for_timeout(1500)
 
     semesters = await page.evaluate("""() => {
-        const semester_re = /(?:SoSe|WiSe|SS|WS)\\s*\\d{2}/i;
+        const semester_re = /(?:SoSe|WiSe|SS|WS|Sommer|Winter)\\s*\\d{2}/i;
+
+        // ── Strategy A: caption-based tables ────────────────────────────────
         const result = [];
         for (const cap of document.querySelectorAll('caption')) {
             if (!semester_re.test(cap.textContent)) continue;
@@ -175,13 +173,49 @@ async def get_all_semester_courses(page: Page) -> list[dict]:
                 seen.add(href);
                 courses.push({name, url: href});
             }
-            result.push({semester: label, courses});
+            if (courses.length) result.push({semester: label, courses});
         }
-        return result;
+        if (result.length) return result;
+
+        // ── Strategy B: look for any heading + nearby links ──────────────────
+        // Walk the DOM: for every element that looks like a semester heading,
+        // collect the course links that follow it until the next heading.
+        const headings = [...document.querySelectorAll('h1,h2,h3,h4,th,td.header,caption,.semester-label,.toggle-indicator')]
+            .filter(el => semester_re.test(el.textContent));
+        if (headings.length) {
+            for (const h of headings) {
+                const label = h.textContent.trim();
+                const parent = h.closest('table,section,div,li') || h.parentElement;
+                const seen = new Set();
+                const courses = [];
+                for (const a of (parent || document).querySelectorAll('a[href*="seminar_main.php"]')) {
+                    const name = a.textContent.trim();
+                    const href = a.href;
+                    if (!name || seen.has(href)) continue;
+                    seen.add(href);
+                    courses.push({name, url: href});
+                }
+                if (courses.length) result.push({semester: label, courses});
+            }
+            if (result.length) return result;
+        }
+
+        // ── Strategy C: flat fallback — collect every course link on the page ─
+        const seen = new Set();
+        const courses = [];
+        for (const a of document.querySelectorAll('a[href*="seminar_main.php"]')) {
+            const name = a.textContent.trim();
+            const href = a.href;
+            if (!name || seen.has(href)) continue;
+            seen.add(href);
+            courses.push({name, url: href});
+        }
+        if (courses.length) return [{semester: 'Alle Kurse', courses}];
+        return [];
     }""")
 
     if not semesters:
-        log.warning("No semester tables found — check CSS selectors.")
+        log.warning("No courses found on %s — try --no-headless to inspect the page.", MY_COURSES_ALL_URL)
     else:
         for s in semesters:
             log.info("Semester: %s — found %d course(s)", s["semester"], len(s["courses"]))
