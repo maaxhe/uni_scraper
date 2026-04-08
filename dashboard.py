@@ -2006,13 +2006,16 @@ async function _renderPdf(container) {
 
   container.innerHTML = ''; // clear old canvases only right before we paint new ones
 
+  const dpr = window.devicePixelRatio || 1;
   for (const page of pages) {
     if (gen !== _pdfGen) return; // superseded mid-render
-    const viewport = page.getViewport({ scale });
-    const canvas   = document.createElement('canvas');
-    canvas.className = 'pdf-page-canvas';
-    canvas.width     = viewport.width;
-    canvas.height    = viewport.height;
+    const viewport    = page.getViewport({ scale: scale * dpr }); // render at physical pixels
+    const canvas      = document.createElement('canvas');
+    canvas.className  = 'pdf-page-canvas';
+    canvas.width      = viewport.width;   // physical pixel size
+    canvas.height     = viewport.height;
+    canvas.style.width  = (viewport.width  / dpr) + 'px'; // CSS display size
+    canvas.style.height = (viewport.height / dpr) + 'px';
     container.appendChild(canvas);
     await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
   }
