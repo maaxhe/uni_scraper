@@ -1678,8 +1678,12 @@ function renderHome(courses, pipeline, streak) {
     .sort((a, b) => b.summary_age - a.summary_age)
     .slice(0, 8);
 
-  // Recommendations
-  const recs = buildRecommendations(courses);
+  // Recommendations — only from the current (newest) semester
+  const currentSem = courseTree.find(item => item.is_semester);
+  const currentSemCourses = currentSem
+    ? courses.filter(c => c.path.startsWith(currentSem.name + '/'))
+    : courses;
+  const recs = buildRecommendations(currentSemCourses);
   const recWrap = document.getElementById('recommendations-wrap');
   if (recs.length) {
     recWrap.innerHTML = `
