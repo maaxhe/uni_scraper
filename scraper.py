@@ -162,28 +162,28 @@ async def get_all_semester_courses(page: Page) -> list[dict]:
 
     for url in pages_to_scrape:
         await page.goto(url, wait_until="networkidle")
-        await page.wait_for_timeout(1000)
-        all_anchors = await page.locator('a[href]').all()
-        log.info("Scanning %s — %d anchors found", url, len(all_anchors))
+        await page.wait_for_timeout(500)
 
-        for anchor in all_anchors:
-            try:
-                href = (await anchor.get_attribute('href') or '').strip()
-                name = (await anchor.text_content() or '').strip()
-            except Exception:
-                continue
+        # Collect all href+text pairs in a single JS call (much faster than
+        # iterating element handles one by one via the Playwright IPC bridge).
+        pairs = await page.evaluate("""() =>
+            [...document.querySelectorAll('a[href]')].map(a => ({
+                href: a.href,
+                name: a.textContent.trim()
+            }))
+        """)
+        log.info("Scanning %s — %d anchors", url, len(pairs))
+
+        for pair in pairs:
+            href = (pair.get('href') or '').strip()
+            name = (pair.get('name') or '').strip()
             if not href or not name:
-                continue
-            if href.startswith('/'):
-                href = STUDIP_BASE + href
-            elif not href.startswith('http'):
                 continue
             if SKIP_URL.search(href):
                 continue
             if not COURSE_URL.search(href):
                 continue
-            # Strip redirect_to= params — same course appears with multiple tab links
-            norm = re.sub(r'&(?:amp;)?redirect_to=[^&]*', '', href)
+            norm = re.sub(r'&redirect_to=[^&]*', '', href)
             if norm in seen_urls:
                 continue
             seen_urls.add(norm)
