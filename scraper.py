@@ -210,13 +210,64 @@ async def get_all_semester_courses(page: Page) -> list[dict]:
 # File downloads for a single course
 # ---------------------------------------------------------------------------
 
-async def download_course_files(page: Page, course: dict, output_root: Path) -> None:
+_SKIP_DIRS = {"Alle Kurse"}  # fallback dirs the scraper itself creates — skip in search
+
+def _find_existing_course_dir(courses_root: Path, course_name: str) -> Path | None:
+    """
+    Search for an existing directory named course_name one level deep under courses_root.
+    Semester folders (SoSe / WiSe / SS / WS) are preferred over generic catch-all folders.
+    Skips directories in _SKIP_DIRS so the scraper's own fallback folder is never
+    returned as an 'existing' location.
+    """
+    # Direct child (not under a semester group)
+    direct = courses_root / course_name
+    if direct.is_dir():
+        return direct
+
+    # Collect matches, then sort so semester-named parents come first
+    matches: list[Path] = []
+    try:
+        for top_dir in courses_root.iterdir():
+            if not top_dir.is_dir() or top_dir.name.startswith('.'):
+                continue
+            if top_dir.name in _SKIP_DIRS:
+                continue
+            candidate = top_dir / course_name
+            if candidate.is_dir():
+                matches.append(candidate)
+    except PermissionError:
+        pass
+
+    if not matches:
+        return None
+
+    # Prefer semester-named parents (SoSe / WiSe / SS / WS)
+    sem_re = re.compile(r'(?:SoSe|WiSe|SS|WS)', re.IGNORECASE)
+    sem_matches = [m for m in matches if sem_re.search(m.parent.name)]
+    return (sem_matches or matches)[0]
+
+
+async def download_course_files(page: Page, course: dict, output_root: Path,
+                                courses_root: Path | None = None) -> None:
     """
     Download all files for a course using the Stud.IP REST API.
     The API uses the same session cookies as the browser.
+
+    courses_root: top-level directory to search for an existing course folder
+                  (e.g. COURSES_DIR). If provided and an existing folder is found
+                  it takes precedence over output_root / course_name.
     """
     course_name = sanitize_dirname(course["name"])
-    dest_dir = output_root / course_name
+
+    # Prefer an already-existing course directory so new folders land in the
+    # right place (e.g. SoSe 2026/Neurodynamics rather than Alle Kurse/Neurodynamics).
+    dest_dir = None
+    if courses_root and courses_root != output_root:
+        dest_dir = _find_existing_course_dir(courses_root, course_name)
+        if dest_dir:
+            log.info("  Existing dir: %s", dest_dir)
+    if dest_dir is None:
+        dest_dir = output_root / course_name
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     log.info("── Course: %s", course["name"])
@@ -403,6 +454,7 @@ async def main() -> None:
                     page,
                     {"name": entry["name"], "url": course_url},
                     course_root,
+                    courses_root=output_root,
                 )
 
             elif args.url:
@@ -441,7 +493,8 @@ async def main() -> None:
                             "name": course["name"],
                             "url":  course["url"],
                         }
-                        await download_course_files(page, course, semester_dir)
+                        await download_course_files(page, course, semester_dir,
+                                                    courses_root=output_root)
                 save_course_registry(registry)
                 log.info("Saved %d course URLs to courses.json", len(registry))
 
