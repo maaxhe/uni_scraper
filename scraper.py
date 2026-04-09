@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import re
@@ -25,7 +26,8 @@ from playwright.async_api import async_playwright, Page, TimeoutError as Playwri
 
 load_dotenv()
 
-STUDIP_BASE = "https://studip.uni-osnabrueck.de"
+STUDIP_BASE  = "https://studip.uni-osnabrueck.de"
+COURSES_JSON = Path(__file__).parent / "courses.json"
 LOGIN_URL = f"{STUDIP_BASE}/index.php"
 MY_COURSES_URL = f"{STUDIP_BASE}/dispatch.php/my_courses"
 # With sem_select=all Stud.IP shows every past semester, not just the current one.
@@ -316,6 +318,20 @@ async def _get_top_folder_id(api, cid: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Course registry (persists course URLs for per-course re-sync)
+# ---------------------------------------------------------------------------
+
+def load_course_registry() -> dict:
+    if COURSES_JSON.exists():
+        return json.loads(COURSES_JSON.read_text(encoding="utf-8"))
+    return {}
+
+
+def save_course_registry(registry: dict) -> None:
+    COURSES_JSON.write_text(json.dumps(registry, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -329,6 +345,12 @@ async def main() -> None:
         "--url",
         metavar="COURSE_URL",
         help="Scrape a single course URL instead of the current semester overview.",
+    )
+    parser.add_argument(
+        "--course",
+        metavar="COURSE_PATH",
+        help="Re-sync a course by its local relative path (e.g. 'Alle Kurse/Neurodynamics'). "
+             "Looks up the URL from courses.json.",
     )
     parser.add_argument(
         "--output",
@@ -365,10 +387,27 @@ async def main() -> None:
         try:
             await login(page)
 
-            if args.url:
-                # ── Mode B: single course ──────────────────────────────────
+            if args.course:
+                # ── Mode C: re-sync by local path ─────────────────────────
+                log.info("Mode C — re-sync by path: %s", args.course)
+                registry = load_course_registry()
+                entry = registry.get(args.course)
+                if not entry:
+                    log.error("Course path '%s' not found in courses.json. "
+                              "Run a full scrape first.", args.course)
+                    return
+                course_url  = entry["url"]
+                course_root = output_root / Path(args.course).parent
+                course_root.mkdir(parents=True, exist_ok=True)
+                await download_course_files(
+                    page,
+                    {"name": entry["name"], "url": course_url},
+                    course_root,
+                )
+
+            elif args.url:
+                # ── Mode B: single course by URL ──────────────────────────
                 log.info("Mode B — targeted course: %s", args.url)
-                # Derive a display name from the URL or page title.
                 await page.goto(args.url, wait_until="networkidle")
                 title = await page.title()
                 course_name = title.split("–")[0].split("-")[0].strip() or "course"
@@ -377,8 +416,9 @@ async def main() -> None:
                     {"name": course_name, "url": args.url},
                     output_root,
                 )
+
             else:
-                # ── Mode A: all semesters ──────────────────────────────────
+                # ── Mode A: all semesters ─────────────────────────────────
                 log.info("Mode A — scraping all semesters…")
                 semesters = await get_all_semester_courses(page)
 
@@ -389,12 +429,21 @@ async def main() -> None:
                     )
                     return
 
+                registry = load_course_registry()
                 for sem in semesters:
                     semester_dir = output_root / sanitize_dirname(sem["semester"])
                     semester_dir.mkdir(parents=True, exist_ok=True)
                     log.info("── Semester: %s", sem["semester"])
                     for course in sem["courses"]:
+                        course_name = sanitize_dirname(course["name"])
+                        rel_path = f"{sanitize_dirname(sem['semester'])}/{course_name}"
+                        registry[rel_path] = {
+                            "name": course["name"],
+                            "url":  course["url"],
+                        }
                         await download_course_files(page, course, semester_dir)
+                save_course_registry(registry)
+                log.info("Saved %d course URLs to courses.json", len(registry))
 
         finally:
             await browser.close()

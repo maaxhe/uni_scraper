@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 COURSES_DIR = Path(os.environ.get("COURSES_DIR", "/Users/maxmacbookpro/Documents/Uni/Cognitive Science [Course]/Courses"))
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".pptx"}
+SUPPORTED_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt", ".md", ".pptx", ".ppt"}
 MAX_CHARS = 40_000
 MODEL = "claude-opus-4-6"
 OUTPUT_FILENAME = "_zusammenfassung.md"
@@ -49,7 +49,7 @@ def extract_text(path: Path) -> str:
         if suffix == ".pdf":
             doc = fitz.open(str(path))
             return "\n".join(page.get_text() for page in doc)
-        elif suffix == ".docx":
+        elif suffix in {".doc", ".docx"}:
             doc = Document(str(path))
             return "\n".join(p.text for p in doc.paragraphs)
         elif suffix in {".txt", ".md"}:

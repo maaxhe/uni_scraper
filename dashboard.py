@@ -26,7 +26,7 @@ OUTPUT_FILENAME  = "_zusammenfassung.md"
 SUMMARY_RE       = re.compile(r'^_zusammenfassung.*\.md$')
 NOTES_FILENAME   = "_notizen.md"
 PROGRESS_FILE    = Path(__file__).parent / "progress.json"
-SUPPORTED_EXT    = {".pdf", ".docx", ".txt", ".md", ".pptx"}
+SUPPORTED_EXT    = {".pdf", ".doc", ".docx", ".txt", ".md", ".pptx", ".ppt"}
 
 app = Flask(__name__)
 
@@ -145,7 +145,6 @@ def list_files(course_dir: Path) -> list[str]:
     return sorted([
         str(f.relative_to(course_dir)) for f in course_dir.rglob("*")
         if f.is_file()
-        and f.suffix.lower() in SUPPORTED_EXT
         and not SUMMARY_RE.match(f.name)
         and f.name != NOTES_FILENAME
         and ".summary" not in f.name
@@ -161,7 +160,7 @@ def read_file_text(course_name: str, filename: str) -> str:
             import fitz
             doc = fitz.open(str(path))
             return "\n\n".join(page.get_text() for page in doc)
-        elif suffix == ".docx":
+        elif suffix in {".doc", ".docx"}:
             from docx import Document
             doc = Document(str(path))
             return "\n".join(p.text for p in doc.paragraphs)
@@ -425,6 +424,34 @@ def api_scrape():
     except Exception as e:
         return jsonify({"success": False, "log": str(e)})
 
+COURSES_JSON = Path(__file__).parent / "courses.json"
+
+@app.route("/api/sync-course", methods=["POST"])
+def api_sync_course():
+    """Re-sync a single course by its local relative path using courses.json."""
+    course_path = (request.json or {}).get("course", "")
+    if not course_path:
+        return jsonify({"success": False, "log": "No course path provided."})
+    if not COURSES_JSON.exists():
+        return jsonify({"success": False, "log": "courses.json not found. Run a full scrape first."})
+    registry = json.loads(COURSES_JSON.read_text(encoding="utf-8"))
+    if course_path not in registry:
+        return jsonify({"success": False, "log": f"Course '{course_path}' not in registry. Run a full scrape first."})
+    try:
+        result = subprocess.run(
+            [PYTHON, SCRAPER_SCRIPT, "--course", course_path],
+            capture_output=True, text=True, timeout=600,
+        )
+        return jsonify({"success": result.returncode == 0, "log": result.stdout + result.stderr})
+    except Exception as e:
+        return jsonify({"success": False, "log": str(e)})
+
+@app.route("/api/course-registry")
+def api_course_registry():
+    if not COURSES_JSON.exists():
+        return jsonify({})
+    return jsonify(json.loads(COURSES_JSON.read_text(encoding="utf-8")))
+
 @app.route("/api/pipeline-status")
 def api_pipeline():
     return jsonify(get_pipeline_status())
@@ -439,7 +466,7 @@ def _extract_file_text(path: Path) -> str:
             import fitz
             doc = fitz.open(str(path))
             return "\n".join(page.get_text() for page in doc)
-        elif suffix == ".docx":
+        elif suffix in {".doc", ".docx"}:
             from docx import Document
             doc = Document(str(path))
             return "\n".join(p.text for p in doc.paragraphs)
@@ -974,6 +1001,9 @@ body {
   padding: 1px 5px; border-radius: 8px; flex-shrink: 0; }
 .folder-contents { overflow: hidden; }
 .folder-contents.collapsed { display: none; }
+.folder-item.has-new .folder-name { color: var(--yellow); }
+.folder-new-badge { font-size: 9px; background: rgba(234,179,8,.18); color: var(--yellow);
+  border: 1px solid rgba(234,179,8,.4); border-radius: 8px; padding: 1px 5px; flex-shrink: 0; }
 
 .file-actions {
   margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border);
@@ -1402,6 +1432,8 @@ body {
     <!-- Course title bar (hidden on home) -->
     <div id="course-title-bar" style="display:none">
       <span id="course-title-text"></span>
+      <button id="course-sync-btn" onclick="syncCourse()" title="Neue Ordner & Dateien von Stud.IP laden"
+        style="background:none;border:1px solid var(--border);cursor:pointer;color:var(--text3);font-size:11px;padding:2px 8px;border-radius:5px;flex-shrink:0;margin-left:auto">↓ Sync</button>
       <button onclick="goHome()" title="Zurück zur Übersicht (Esc)" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:12px;padding:2px 6px;border-radius:5px;flex-shrink:0">✕</button>
     </div>
 
@@ -2005,6 +2037,18 @@ function countTreeFiles(node) {
 // Globally track collapsed folder paths for the current course
 const _collapsedFolders = new Set();
 
+function hasNewFilesInTree(node, metaMap, summaryAge) {
+  if (!summaryAge) return false;
+  for (const f of node.files) {
+    const m = metaMap[f] || {};
+    if (m.mtime && m.mtime > summaryAge) return true;
+  }
+  for (const child of Object.values(node.dirs)) {
+    if (hasNewFilesInTree(child, metaMap, summaryAge)) return true;
+  }
+  return false;
+}
+
 function renderFileTree(node, allFiles, summaryAge, metaMap, depth) {
   let html = '';
   const indent = depth * 14;
@@ -2028,12 +2072,14 @@ function renderFileTree(node, allFiles, summaryAge, metaMap, depth) {
     const folderPath = child.path;
     const collapsed = _collapsedFolders.has(folderPath);
     const count = countTreeFiles(child);
+    const folderIsNew = hasNewFilesInTree(child, metaMap, summaryAge);
     html += `
-    <div class="folder-item${collapsed ? ' collapsed' : ''}" style="padding-left:${8 + indent}px"
+    <div class="folder-item${collapsed ? ' collapsed' : ''}${folderIsNew ? ' has-new' : ''}" style="padding-left:${8 + indent}px"
          onclick="toggleFileFolder('${esc(folderPath)}', this)">
       <span class="folder-chevron">▼</span>
       <span class="folder-icon">📁</span>
       <span class="folder-name">${esc(name)}</span>
+      ${folderIsNew ? '<span class="folder-new-badge">Neu</span>' : ''}
       <span class="folder-count">${count}</span>
     </div>
     <div class="folder-contents${collapsed ? ' collapsed' : ''}" data-folder="${esc(folderPath)}">
@@ -2055,8 +2101,14 @@ function previewFileFromEl(el) { previewFile(el.dataset.filename); }
 
 function fileIcon(name) {
   const ext = name.split('.').pop().toLowerCase();
-  return {pdf:'📕', docx:'📘', pptx:'📙', txt:'📃', md:'📝'}[ext] || '📄';
+  return {pdf:'📕', doc:'📘', docx:'📘', ppt:'📙', pptx:'📙', txt:'📃', md:'📝',
+          jpg:'🖼', jpeg:'🖼', png:'🖼', gif:'🖼', svg:'🖼',
+          zip:'🗜', rar:'🗜', '7z':'🗜',
+          mp4:'🎬', mov:'🎬', avi:'🎬', mp3:'🎵', wav:'🎵',
+          py:'💻', js:'💻', ts:'💻', java:'💻', cpp:'💻', c:'💻'}[ext] || '📄';
 }
+
+const PREVIEWABLE_EXT = new Set(['pdf','doc','docx','ppt','pptx','txt','md','py','js','ts','java','cpp','c','h','css','html','json','xml','csv']);
 
 async function previewFile(filename) {
   document.querySelectorAll('.file-item').forEach(el => {
@@ -2091,9 +2143,19 @@ async function previewFile(filename) {
     await _loadPdfJs(body);
     _setupPdfResizeObserver(body);
     _setupPdfWheelZoom(body);
-  } else {
+  } else if (PREVIEWABLE_EXT.has(ext)) {
     const data = await fetch(`/api/file-text/${enc(activeCourse)}/${enc(filename)}`).then(r => r.json());
     body.innerHTML = esc(data.text || '(Kein Text lesbar)');
+  } else {
+    body.innerHTML = `<div class="preview-placeholder">
+      <div class="icon">${fileIcon(filename)}</div>
+      <div style="margin-bottom:12px;color:var(--text2)">${esc(filename.split('/').pop())}</div>
+      <div style="font-size:12px;color:var(--text3);margin-bottom:16px">Dieses Format kann nicht in der Vorschau angezeigt werden.</div>
+      <a href="/api/file-raw/${enc(activeCourse)}/${enc(filename)}" download
+         style="background:var(--blue);color:#fff;padding:8px 18px;border-radius:6px;text-decoration:none;font-size:13px">
+        ⬇ Herunterladen
+      </a>
+    </div>`;
   }
 }
 
@@ -2954,6 +3016,33 @@ async function runScraper() {
     toast('Dateien aktualisiert!', 'ok');
   } else {
     toast('Fehler beim Scraping.', 'err');
+  }
+}
+
+async function syncCourse() {
+  if (!activeCourse) return;
+  const btn = document.getElementById('course-sync-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Sync…'; }
+  setLoading(true);
+  logShow(`Sync: ${activeCourse}…\n`);
+  const res  = await fetch('/api/sync-course', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({course: activeCourse}),
+  });
+  const data = await res.json();
+  logAppend(data.log || '');
+  setLoading(false);
+  if (btn) { btn.disabled = false; btn.textContent = '↓ Sync'; }
+  if (data.success) {
+    logAppend('\n✅ Fertig!');
+    courseTree = await fetch('/api/courses').then(r => r.json());
+    allCourses = flattenTree(courseTree);
+    filterAndRenderSidebar();
+    loadFiles();
+    toast('Kurs aktualisiert!', 'ok');
+  } else {
+    toast(data.log?.includes('not in registry') ? 'Zuerst vollen Sync ausführen.' : 'Sync fehlgeschlagen.', 'err');
   }
 }
 
