@@ -3013,6 +3013,7 @@ async function runScraper() {
     courseTree = await fetch('/api/courses').then(r => r.json());
     allCourses = flattenTree(courseTree);
     filterAndRenderSidebar();
+    if (activeCourse) loadFiles();
     toast('Dateien aktualisiert!', 'ok');
   } else {
     toast('Fehler beim Scraping.', 'err');
