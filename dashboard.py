@@ -975,7 +975,7 @@ body {
 }
 .file-item:hover { background: var(--bg3); }
 .file-item.active { background: var(--bg4); border-color: rgba(79,142,247,.4); }
-.file-item.new-file { border-color: rgba(251,191,36,.25); }
+.file-item.new-file { border-color: rgba(251,191,36,.35); background: rgba(251,191,36,.06); }
 .file-item input[type=checkbox] { accent-color: var(--blue); flex-shrink: 0; cursor: pointer; }
 .file-icon { font-size: 14px; flex-shrink: 0; }
 .file-name { font-size: 12px; color: var(--text2); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -2063,7 +2063,8 @@ function renderFileTree(node, allFiles, summaryAge, metaMap, depth) {
          style="padding-left:${8 + indent}px" onclick="previewFileFromEl(this)">
       <input type="checkbox" name="file" value="${esc(f)}" checked onclick="event.stopPropagation()">
       <span class="file-icon">${fileIcon(f)}</span>
-      <span class="file-name" title="${esc(f)}">${esc(displayName)}${isNew ? '<span class="new-badge">Neu</span>' : ''}</span>
+      <span class="file-name" title="${esc(f)}">${esc(displayName)}</span>
+      ${isNew ? '<span class="new-badge" style="flex-shrink:0">Neu</span>' : ''}
     </div>`;
   }
 
