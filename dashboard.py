@@ -452,6 +452,21 @@ def api_course_registry():
         return jsonify({})
     return jsonify(json.loads(COURSES_JSON.read_text(encoding="utf-8")))
 
+@app.route("/api/course-info/<path:course_name>")
+def api_course_info(course_name):
+    """Return stored metadata for a course from courses.json."""
+    if not COURSES_JSON.exists():
+        return jsonify({})
+    registry = json.loads(COURSES_JSON.read_text(encoding="utf-8"))
+    # Try exact match first, then suffix match (registry keys may differ from dashboard paths)
+    entry = registry.get(course_name)
+    if not entry:
+        for key, val in registry.items():
+            if key.endswith("/" + course_name.split("/")[-1]):
+                entry = val
+                break
+    return jsonify(entry.get("meta", {}) if entry else {})
+
 @app.route("/api/pipeline-status")
 def api_pipeline():
     return jsonify(get_pipeline_status())
@@ -1298,6 +1313,15 @@ body {
 
 /* Chat panel — NO display override here, uses .panel base class */
 #panel-chat { padding: 0; overflow: hidden; }
+
+/* Course info panel */
+.info-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; margin-bottom: 14px; }
+.info-title { font-size: 17px; font-weight: 700; color: var(--text1); margin-bottom: 4px; line-height: 1.3; }
+.info-subtitle { font-size: 13px; color: var(--text3); margin-bottom: 16px; }
+.info-grid { display: grid; grid-template-columns: 140px 1fr; gap: 8px 16px; font-size: 13px; }
+.info-label { color: var(--text3); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding-top: 2px; }
+.info-value { color: var(--text2); line-height: 1.5; }
+.info-desc { font-size: 13px; color: var(--text2); line-height: 1.65; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); white-space: pre-wrap; }
 .chat-layout { display: flex; flex-direction: column; height: 100%; }
 .chat-messages {
   flex: 1; overflow-y: auto; padding: 28px 40px; display: flex; flex-direction: column; gap: 18px;
@@ -1440,6 +1464,7 @@ body {
     <!-- Tabs (hidden on home) -->
     <div id="tabs" style="display:none">
       <button class="tab active" data-tab="files"   onclick="switchTab('files')">📁 Dateien</button>
+      <button class="tab"        data-tab="info"    onclick="switchTab('info')">ℹ️ Info</button>
       <button class="tab"        data-tab="summary" onclick="switchTab('summary')">📄 Zusammenfassung</button>
       <button class="tab"        data-tab="learn"   onclick="switchTab('learn')">🧠 Lernen</button>
       <button class="tab"        data-tab="notes"   onclick="switchTab('notes')">✏️ Notizen</button>
@@ -1458,6 +1483,16 @@ body {
         <div id="recommendations-wrap"></div>
         <div class="section-title">Zuletzt aktualisiert</div>
         <div class="recent-list" id="recent-list"></div>
+      </div>
+
+      <!-- Info -->
+      <div class="panel" id="panel-info">
+        <div id="info-body" style="max-width:680px">
+          <div class="empty-state">
+            <div class="icon">ℹ️</div>
+            <h3>Kursinfo wird geladen…</h3>
+          </div>
+        </div>
       </div>
 
       <!-- Files -->
@@ -1975,6 +2010,7 @@ function switchTab(tab) {
   showPanel(tab);
   if (tab === 'files') _updateSummarizeBtn();
 
+  if (tab === 'info')    loadInfo();
   if (tab === 'summary') loadSummary();
   if (tab === 'learn')   loadFlashcards();
   if (tab === 'notes')   loadNotes();
@@ -2320,6 +2356,54 @@ function toggleAllFiles() {
 
 function getSelectedFiles() {
   return [...document.querySelectorAll('input[name="file"]:checked')].map(cb => cb.value);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Info tab
+// ═══════════════════════════════════════════════════════════════════════════
+async function loadInfo() {
+  const el = document.getElementById('info-body');
+  el.innerHTML = '<div style="color:var(--text3);font-size:13px;padding:16px">Lade Kursinfos…</div>';
+
+  const course = allCourses.find(c => c.path === activeCourse);
+  let info = {};
+  try {
+    info = await fetch(`/api/course-info/${enc(activeCourse)}`).then(r => r.json());
+  } catch(_) {}
+
+  const noInfo = !info || !Object.values(info).some(v => v && (Array.isArray(v) ? v.length : true));
+
+  if (noInfo) {
+    el.innerHTML = `
+      <div class="info-card">
+        <div class="info-title">${esc(course?.name || activeCourse.split('/').pop())}</div>
+        <div class="info-subtitle" style="margin-top:8px;color:var(--text3)">
+          Keine Kursinfos gespeichert. Führe einen Sync aus um Infos von Stud.IP zu laden.
+        </div>
+      </div>`;
+    return;
+  }
+
+  const row = (label, value) => value
+    ? `<div class="info-label">${label}</div><div class="info-value">${esc(String(value))}</div>`
+    : '';
+
+  const lecturers = Array.isArray(info.lecturers) ? info.lecturers.join(', ') : (info.lecturers || '');
+
+  el.innerHTML = `
+    <div class="info-card">
+      <div class="info-title">${esc(info.title || course?.name || activeCourse.split('/').pop())}</div>
+      ${info.subtitle ? `<div class="info-subtitle">${esc(info.subtitle)}</div>` : ''}
+      <div class="info-grid">
+        ${row('Dozent/-in', lecturers)}
+        ${row('Typ', info.type)}
+        ${row('Semester', info.semester)}
+        ${row('Ort', info.location)}
+        ${row('ECTS', info.ects)}
+        ${row('Teilnehmer', info.participants)}
+      </div>
+      ${info.description ? `<div class="info-desc">${esc(info.description)}</div>` : ''}
+    </div>`;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

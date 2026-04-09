@@ -283,6 +283,12 @@ async def download_course_files(page: Page, course: dict, output_root: Path,
     # Use the browser context's request object so API calls share the session cookies
     api = page.context.request
 
+    # Fetch and store course metadata (non-blocking — failure is silently ignored)
+    meta = await _fetch_course_meta(api, cid)
+    if meta:
+        course["meta"] = meta
+        log.info("  Instructor(s): %s", ", ".join(meta.get("lecturers", [])) or "–")
+
     folder_id = await _get_top_folder_id(api, cid)
     if not folder_id:
         log.warning("  No files folder found for %s (cid=%s)", course["name"], cid)
@@ -343,6 +349,72 @@ async def _api_download_folder(api, dest_dir: Path, folder_id: str, depth: int =
             log.info("%s  Saved: %s", indent, save_path)
         except Exception as exc:
             log.warning("%s  Failed: %s — %s", indent, filename, exc)
+
+
+async def _fetch_course_meta(api, cid: str) -> dict:
+    """
+    Fetch course metadata (title, description, instructors, type, …) from the StudIP REST API.
+    Returns a cleaned dict suitable for storage in courses.json.
+    """
+    resp = await api.get(f"{STUDIP_BASE}/api.php/course/{cid}")
+    if resp.status != 200:
+        return {}
+    try:
+        data = await resp.json()
+    except Exception:
+        return {}
+
+    # Lecturers: dict of {user_id: {name: {formatted: ...}, ...}}
+    lecturers_raw = data.get("members", {}) or data.get("lecturers", {}) or {}
+    # The API may return a flat list or a nested dict depending on the endpoint version
+    lecturers: list[str] = []
+    if isinstance(lecturers_raw, dict):
+        for v in lecturers_raw.values():
+            name = (v.get("name") or {}).get("formatted") or v.get("fullname") or ""
+            if name:
+                lecturers.append(name)
+    elif isinstance(lecturers_raw, list):
+        for v in lecturers_raw:
+            name = (v.get("name") or {}).get("formatted") or v.get("fullname") or ""
+            if name:
+                lecturers.append(name)
+
+    # Try dedicated lecturers endpoint if the main one returned nothing
+    if not lecturers:
+        r2 = await api.get(f"{STUDIP_BASE}/api.php/course/{cid}/members")
+        if r2.status == 200:
+            try:
+                members = await r2.json()
+                for role_key in ("dozenten", "lecturers", "teachers"):
+                    role_data = members.get(role_key) if isinstance(members, dict) else None
+                    if role_data:
+                        for v in (role_data.values() if isinstance(role_data, dict) else role_data):
+                            name = (v.get("name") or {}).get("formatted") or v.get("fullname") or ""
+                            if name:
+                                lecturers.append(name)
+                        break
+            except Exception:
+                pass
+
+    course_type = data.get("type", "") or data.get("form", "")
+    type_labels = {
+        "1": "Vorlesung", "2": "Seminar", "3": "Übung", "4": "Praktikum",
+        "5": "Kolloquium", "6": "AG", "99": "Sonstiges",
+        "Vorlesung": "Vorlesung", "Seminar": "Seminar",
+    }
+    type_label = type_labels.get(str(course_type), str(course_type)) if course_type else ""
+
+    return {
+        "title":       data.get("title") or data.get("name") or "",
+        "subtitle":    data.get("subtitle") or "",
+        "description": (data.get("description") or "").strip(),
+        "type":        type_label,
+        "lecturers":   lecturers,
+        "semester":    data.get("start_semester", {}).get("title", "") if isinstance(data.get("start_semester"), dict) else "",
+        "location":    data.get("location") or "",
+        "ects":        data.get("ects") or "",
+        "participants": data.get("admission_turnout") or "",
+    }
 
 
 async def _get_top_folder_id(api, cid: str) -> str | None:
@@ -492,6 +564,7 @@ async def main() -> None:
                         registry[rel_path] = {
                             "name": course["name"],
                             "url":  course["url"],
+                            "meta": course.get("meta", registry.get(rel_path, {}).get("meta", {})),
                         }
                         await download_course_files(page, course, semester_dir,
                                                     courses_root=output_root)
