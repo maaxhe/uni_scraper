@@ -841,6 +841,38 @@ body {
 .fav-btn:hover { opacity: .8; transform: scale(1.25); }
 .fav-btn.is-fav { opacity: 1; }
 
+/* Context menu */
+#ctx-menu {
+  position: fixed; z-index: 9999;
+  background: var(--bg2); border: 1px solid var(--border2);
+  border-radius: var(--radius); padding: 4px 0;
+  box-shadow: 0 4px 16px rgba(0,0,0,.35);
+  min-width: 160px; display: none;
+}
+#ctx-menu.visible { display: block; }
+.ctx-item {
+  padding: 7px 14px; font-size: 12px; color: var(--text2);
+  cursor: pointer; white-space: nowrap;
+  transition: background var(--transition);
+}
+.ctx-item:hover { background: var(--bg3); color: var(--text); }
+.ctx-item.danger { color: #f87171; }
+.ctx-item.danger:hover { background: rgba(248,113,113,.12); }
+
+/* Archive section header */
+.archive-header {
+  display: flex; align-items: center; gap: 7px;
+  padding: 7px 10px 7px; cursor: pointer;
+  border-radius: var(--radius);
+  transition: background var(--transition);
+  margin: 8px 0 1px; user-select: none;
+  border-left: 2px solid transparent;
+  font-size: 10px; color: var(--text3);
+  font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+}
+.archive-header:hover { background: var(--bg3); color: var(--text2); }
+.citem.archived { opacity: 0.55; }
+
 /* Group headers in sidebar */
 .group-header {
   display: flex; align-items: center; gap: 7px; padding: 7px 10px;
@@ -1100,6 +1132,22 @@ body {
 .pdf-page-canvas {
   display: block; box-shadow: 0 2px 8px rgba(0,0,0,.6);
 }
+/* PDF text layer — transparent overlay for text selection */
+.pdf-page-wrapper {
+  position: relative; display: inline-block;
+  box-shadow: 0 2px 8px rgba(0,0,0,.6);
+}
+.pdf-page-wrapper .pdf-page-canvas { box-shadow: none; }
+.textLayer {
+  position: absolute; left: 0; top: 0; right: 0; bottom: 0;
+  overflow: hidden; pointer-events: none; line-height: 1;
+  user-select: text; pointer-events: auto;
+}
+.textLayer span, .textLayer br {
+  color: transparent; position: absolute; white-space: pre;
+  cursor: text; transform-origin: 0% 0%;
+}
+.textLayer ::selection { background: rgba(58,130,246,.35); color: transparent; }
 
 /* Fullscreen */
 .preview-box:fullscreen { border-radius: 0; }
@@ -1442,6 +1490,79 @@ body {
 .search-source-summary { background: rgba(79,142,247,.12); color: var(--blue); }
 .search-source-notes   { background: rgba(167,139,250,.12); color: var(--purple); }
 .search-source-both    { background: rgba(52,211,153,.12);  color: var(--green); }
+
+/* ── Command Palette ── */
+#cmd-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 400;
+  display: none; align-items: flex-start; justify-content: center;
+  padding-top: 14vh; backdrop-filter: blur(5px);
+}
+#cmd-overlay.open { display: flex; }
+#cmd-box {
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius-xl);
+  width: 100%; max-width: 560px; box-shadow: var(--shadow-lg);
+  overflow: hidden; animation: panelIn .15s ease;
+}
+#cmd-input {
+  width: 100%; padding: 16px 20px; background: transparent;
+  border: none; border-bottom: 1px solid var(--border);
+  color: var(--text); font-size: 15px; outline: none; font-family: inherit;
+}
+#cmd-input::placeholder { color: var(--text3); }
+#cmd-results { max-height: 380px; overflow-y: auto; padding: 6px; }
+.cmd-item {
+  display: flex; align-items: center; gap: 12px; padding: 10px 14px;
+  border-radius: var(--radius); cursor: pointer;
+  transition: background var(--transition); user-select: none;
+}
+.cmd-item.cmd-selected { background: rgba(79,142,247,.14); }
+.cmd-item-icon { font-size: 15px; width: 22px; text-align: center; flex-shrink: 0; }
+.cmd-item-label { flex: 1; font-size: 13px; font-weight: 500; color: var(--text2); }
+.cmd-item.cmd-selected .cmd-item-label { color: var(--text); }
+.cmd-item-meta { font-size: 11px; color: var(--text3); flex-shrink: 0; }
+.cmd-section { font-size: 9px; text-transform: uppercase; letter-spacing: .1em; color: var(--text3); padding: 8px 14px 3px; font-weight: 700; }
+#cmd-empty { text-align: center; padding: 30px; color: var(--text3); font-size: 13px; }
+#cmd-footer {
+  padding: 8px 16px; border-top: 1px solid var(--border);
+  display: flex; gap: 16px; align-items: center;
+}
+.cmd-hint { font-size: 10px; color: var(--text3); display: flex; align-items: center; gap: 4px; }
+.cmd-hint kbd {
+  background: var(--bg4); border: 1px solid var(--border2); border-radius: 4px;
+  padding: 1px 5px; font-size: 9px; font-family: "SF Mono", monospace; color: var(--text3);
+}
+
+/* ── Summary ToC ── */
+.summary-layout { display: flex; gap: 28px; align-items: flex-start; }
+.summary-toc {
+  width: 190px; min-width: 160px; flex-shrink: 0;
+  position: sticky; top: 0; align-self: flex-start; padding-bottom: 20px;
+}
+.summary-toc-title {
+  font-size: 9px; text-transform: uppercase; letter-spacing: .1em;
+  color: var(--text3); font-weight: 700; margin-bottom: 8px; padding-left: 8px;
+}
+.toc-link {
+  display: block; font-size: 12px; color: var(--text3); text-decoration: none;
+  padding: 4px 8px; border-radius: 5px; border-left: 2px solid transparent;
+  transition: color var(--transition), border-color var(--transition), background var(--transition);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 1px; line-height: 1.4;
+}
+.toc-link:hover { color: var(--text2); border-left-color: var(--border2); background: var(--bg3); }
+.toc-link.toc-h3 { padding-left: 18px; font-size: 11px; }
+.toc-link.toc-active { color: var(--blue); border-left-color: var(--blue); background: rgba(79,142,247,.07); }
+.summary-content-wrap { flex: 1; min-width: 0; }
+@media (max-width: 960px) { .summary-toc { display: none; } }
+
+/* ── Selection toolbar ── */
+#selection-toolbar {
+  background: rgba(79,142,247,.07); border: 1px solid rgba(79,142,247,.25);
+  border-radius: var(--radius); padding: 8px 10px; margin-top: 8px;
+  display: none; flex-direction: column; gap: 5px;
+}
+#selection-toolbar.visible { display: flex; }
+#sel-count { font-size: 11px; color: var(--blue); font-weight: 600; }
+.sel-toolbar-btns { display: flex; gap: 5px; }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
@@ -1461,6 +1582,13 @@ body {
 
 <!-- Mobile sidebar backdrop -->
 <div id="sidebar-backdrop" onclick="toggleSidebar()"></div>
+
+<!-- Course context menu -->
+<div id="ctx-menu">
+  <div class="ctx-item" id="ctx-archive-btn" onclick="ctxArchive()">📦 Archivieren</div>
+  <div class="ctx-item" id="ctx-restore-btn" onclick="ctxRestore()" style="display:none">↩ Wiederherstellen</div>
+  <div class="ctx-item danger" id="ctx-remove-btn" onclick="ctxRemove()">✕ Entfernen</div>
+</div>
 
 <!-- Layout -->
 <div id="layout">
@@ -1549,11 +1677,19 @@ body {
                 <option value="name">Name</option>
                 <option value="date">Datum</option>
               </select>
-              <button id="selection-toggle-btn" style="font-size:11px;color:var(--text3);background:none;border:none;cursor:pointer;" onclick="toggleSelectionMode()">Auswählen</button>
+              <button id="selection-toggle-btn" style="font-size:11px;color:var(--text3);background:none;border:1px solid var(--border);border-radius:5px;padding:2px 8px;cursor:pointer;transition:all .15s" onclick="toggleSelectionMode()">Auswählen</button>
             </div>
             <div id="file-list"></div>
             <div class="file-actions">
-              <div style="display:flex;gap:6px;margin-bottom:4px">
+              <div id="selection-toolbar">
+                <span id="sel-count">0 ausgewählt</span>
+                <div class="sel-toolbar-btns">
+                  <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markSelectedFilesRead(true)">✓ Gelesen</button>
+                  <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markSelectedFilesRead(false)">↺ Ungelesen</button>
+                </div>
+                <button class="tbtn btn-blue" id="sel-summarize-btn" style="width:100%;font-size:11px" onclick="generateSummary(false)">Ausgewählte zusammenfassen</button>
+              </div>
+              <div id="bulk-read-row" style="display:flex;gap:6px;margin-bottom:4px">
                 <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markAllFilesRead(true)">✓ Alle gelesen</button>
                 <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markAllFilesRead(false)">↺ Alle ungelesen</button>
               </div>
@@ -1657,7 +1793,7 @@ body {
     <h3>⌨️ Tastenkürzel</h3>
     <div class="shortcuts-section">Global</div>
     <div class="shortcut-row"><kbd>?</kbd>          <span class="shortcut-desc">Tastenkürzel anzeigen</span></div>
-    <div class="shortcut-row"><kbd>Ctrl+K</kbd>     <span class="shortcut-desc">Globale Suche fokussieren</span></div>
+    <div class="shortcut-row"><kbd>⌘K</kbd>         <span class="shortcut-desc">Command Palette öffnen</span></div>
     <div class="shortcut-row"><kbd>Esc</kbd>        <span class="shortcut-desc">Zur Übersicht / Overlay schließen</span></div>
     <div class="shortcuts-section">Lernkarten</div>
     <div class="shortcut-row"><kbd>Space</kbd>      <span class="shortcut-desc">Antwort anzeigen</span></div>
@@ -1685,6 +1821,22 @@ body {
     <div class="confirm-btns">
       <button class="tbtn btn-gray" onclick="hideConfirm()">Abbrechen</button>
       <button class="tbtn btn-red" id="confirm-ok">Bestätigen</button>
+    </div>
+  </div>
+</div>
+
+<!-- Command Palette -->
+<div id="cmd-overlay" onclick="closeCmdPalette()">
+  <div id="cmd-box" onclick="event.stopPropagation()">
+    <input id="cmd-input" type="text" placeholder="Kurs oder Aktion suchen…"
+      oninput="renderPaletteResults(this.value)"
+      onkeydown="handlePaletteKey(event)"
+      autocomplete="off" spellcheck="false">
+    <div id="cmd-results"></div>
+    <div id="cmd-footer">
+      <span class="cmd-hint"><kbd>↑↓</kbd> navigieren</span>
+      <span class="cmd-hint"><kbd>↵</kbd> öffnen</span>
+      <span class="cmd-hint"><kbd>Esc</kbd> schließen</span>
     </div>
   </div>
 </div>
@@ -1756,6 +1908,76 @@ function toggleFavorite(name) {
   setFavorites(favs);
 }
 
+// ───────────────────────── Archive ─────────────────────────
+function getArchived() {
+  try { return JSON.parse(localStorage.getItem('archived_courses') || '[]'); } catch { return []; }
+}
+function setArchived(arr) { localStorage.setItem('archived_courses', JSON.stringify(arr)); }
+function isArchived(path) { return getArchived().includes(path); }
+
+// ───────────────────────── Hidden (removed) ─────────────────────────
+function getHidden() {
+  try { return JSON.parse(localStorage.getItem('hidden_courses') || '[]'); } catch { return []; }
+}
+function setHidden(arr) { localStorage.setItem('hidden_courses', JSON.stringify(arr)); }
+
+// ───────────────────────── Context menu ─────────────────────────
+let _ctxPath = null;
+let _archiveOpen = false;
+
+function showCtxMenu(e, path) {
+  e.preventDefault();
+  e.stopPropagation();
+  _ctxPath = path;
+  const archived = isArchived(path);
+  document.getElementById('ctx-archive-btn').style.display = archived ? 'none' : '';
+  document.getElementById('ctx-restore-btn').style.display = archived ? '' : 'none';
+  const menu = document.getElementById('ctx-menu');
+  menu.classList.add('visible');
+  // Position near cursor, keep inside viewport
+  const mw = 170, mh = 90;
+  let x = e.clientX, y = e.clientY;
+  if (x + mw > window.innerWidth)  x = window.innerWidth  - mw - 8;
+  if (y + mh > window.innerHeight) y = window.innerHeight - mh - 8;
+  menu.style.left = x + 'px';
+  menu.style.top  = y + 'px';
+}
+function hideCtxMenu() {
+  document.getElementById('ctx-menu').classList.remove('visible');
+  _ctxPath = null;
+}
+document.addEventListener('click', hideCtxMenu);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') hideCtxMenu(); });
+
+function ctxArchive() {
+  if (!_ctxPath) return;
+  const arr = getArchived();
+  if (!arr.includes(_ctxPath)) arr.push(_ctxPath);
+  setArchived(arr);
+  if (activeCourse === _ctxPath) goHome();
+  _archiveOpen = true; // auto-expand archive after archiving
+  hideCtxMenu();
+  filterAndRenderSidebar();
+}
+function ctxRestore() {
+  if (!_ctxPath) return;
+  setArchived(getArchived().filter(p => p !== _ctxPath));
+  hideCtxMenu();
+  filterAndRenderSidebar();
+}
+function ctxRemove() {
+  if (!_ctxPath) return;
+  if (!confirm(`Kurs "${_ctxPath}" dauerhaft aus der Sidebar entfernen?`)) return;
+  const h = getHidden();
+  if (!h.includes(_ctxPath)) h.push(_ctxPath);
+  setHidden(h);
+  // also remove from archive if there
+  setArchived(getArchived().filter(p => p !== _ctxPath));
+  if (activeCourse === _ctxPath) goHome();
+  hideCtxMenu();
+  filterAndRenderSidebar();
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Boot
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1802,7 +2024,12 @@ function setSortAndRender(s) {
 
 function filterCourses(courses) {
   const q = document.getElementById('sidebar-search').value.toLowerCase();
-  let result = courses.filter(c => c.name.toLowerCase().includes(q) || (c.path||'').toLowerCase().includes(q));
+  const hidden   = getHidden();
+  const archived = getArchived();
+  let result = courses.filter(c =>
+    !hidden.includes(c.path) && !archived.includes(c.path) &&
+    (c.name.toLowerCase().includes(q) || (c.path||'').toLowerCase().includes(q))
+  );
   if (sidebarFilter === 'summary')   result = result.filter(c => c.has_summary);
   if (sidebarFilter === 'nosummary') result = result.filter(c => !c.has_summary);
   if (sidebarFilter === 'fav')       result = result.filter(c => isFavorite(c.path));
@@ -1817,18 +2044,20 @@ function filterCourses(courses) {
 }
 
 function filterAndRenderSidebar() {
-  const q = document.getElementById('sidebar-search').value.toLowerCase();
+  const q        = document.getElementById('sidebar-search').value.toLowerCase();
+  const hidden   = getHidden();
+  const archived = getArchived();
 
-  // Build filtered tree
+  // Build filtered tree (exclude hidden + archived from main list)
   const filteredTree = [];
   for (const item of courseTree) {
     if (item.is_group) {
       const filtered = filterCourses(item.courses);
-      // Also match if group name matches query
       if (filtered.length || item.name.toLowerCase().includes(q)) {
         filteredTree.push({ ...item, courses: filtered.length ? filtered : item.courses.filter(() => !q) });
       }
     } else {
+      if (hidden.includes(item.path) || archived.includes(item.path)) continue;
       const matches = item.name.toLowerCase().includes(q);
       const passFilter = (sidebarFilter === 'all') ||
         (sidebarFilter === 'summary'   && item.has_summary) ||
@@ -1854,7 +2083,7 @@ function toggleGroup(groupName) {
 function renderSidebar(tree) {
   const el = document.getElementById('course-list');
 
-  function courseHTML(c, indent = false) {
+  function courseHTML(c, indent = false, inArchive = false) {
     const pct = c.progress.total ? Math.round(c.progress.known / c.progress.total * 100) : 0;
     const fav = isFavorite(c.path);
     const lastStudied = c.progress.last_studied
@@ -1862,8 +2091,10 @@ function renderSidebar(tree) {
       : null;
     const readCount = c.file_count > 0 ? getReadSet(c.path).size : 0;
     const allRead = c.file_count > 0 && readCount >= c.file_count;
+    const archiveClass = inArchive ? ' archived' : '';
     return `
-    <div class="citem ${activeCourse === c.path ? 'active' : ''}" data-course="${esc(c.path)}" onclick="selectCourseFromEl(this)"
+    <div class="citem${archiveClass} ${activeCourse === c.path ? 'active' : ''}" data-course="${esc(c.path)}" onclick="selectCourseFromEl(this)"
+         oncontextmenu="showCtxMenu(event,'${esc(c.path)}')"
          style="${indent ? 'padding-left:22px' : ''}">
       <div class="citem-dot ${c.has_summary ? 'dot-ok' : 'dot-missing'}"></div>
       <div class="citem-body">
@@ -1877,8 +2108,10 @@ function renderSidebar(tree) {
         </div>
         ${c.progress.total ? `<div class="progress-mini"><div class="progress-mini-fill" style="width:${pct}%"></div></div>` : ''}
       </div>
-      <button class="fav-btn ${fav ? 'is-fav' : ''}" title="${fav ? 'Favorit entfernen' : 'Als Favorit markieren'}"
-        onclick="event.stopPropagation(); handleFavClick('${esc(c.path)}')">⭐</button>
+      ${inArchive
+        ? `<button class="fav-btn" title="Wiederherstellen" onclick="event.stopPropagation(); setArchived(getArchived().filter(p=>p!=='${esc(c.path)}')); filterAndRenderSidebar()">↩</button>`
+        : `<button class="fav-btn ${fav ? 'is-fav' : ''}" title="${fav ? 'Favorit entfernen' : 'Als Favorit markieren'}" onclick="event.stopPropagation(); handleFavClick('${esc(c.path)}')">⭐</button>`
+      }
     </div>`;
   }
 
@@ -1899,7 +2132,7 @@ function renderSidebar(tree) {
 
   // Separate favorites from tree
   const favPaths = getFavorites();
-  const favCourses = allCourses.filter(c => favPaths.includes(c.path));
+  const favCourses = allCourses.filter(c => favPaths.includes(c.path) && !getArchived().includes(c.path) && !getHidden().includes(c.path));
 
   let html = '';
   if (favCourses.length) {
@@ -1916,6 +2149,20 @@ function renderSidebar(tree) {
     for (const item of tree) {
       html += item.is_group ? groupHTML(item) : courseHTML(item);
     }
+  }
+
+  // Archive section
+  const archivedPaths = getArchived();
+  const archivedCoursesList = allCourses.filter(c => archivedPaths.includes(c.path));
+  if (archivedCoursesList.length) {
+    const archCollapsed = !_archiveOpen;
+    html += `
+    <div class="archive-header" onclick="_archiveOpen=!_archiveOpen; filterAndRenderSidebar()">
+      <span class="group-chevron">${archCollapsed ? '▶' : '▼'}</span>
+      <span>📦 Archiv</span>
+      <span style="margin-left:auto;font-size:10px;opacity:.6">${archivedCoursesList.length}</span>
+    </div>
+    ${archCollapsed ? '' : archivedCoursesList.map(c => courseHTML(c, false, true)).join('')}`;
   }
 
   el.innerHTML = html;
@@ -2224,7 +2471,7 @@ function renderFileTree(node, allFiles, summaryAge, metaMap, depth) {
     html += `
     <div class="file-item${isNew ? ' new-file' : ''}${read ? ' file-read' : ''}" data-filename="${esc(f)}"
          style="padding-left:${8 + indent}px" onclick="previewFileFromEl(this)">
-      <input type="checkbox" name="file" value="${esc(f)}" checked onclick="event.stopPropagation()">
+      <input type="checkbox" name="file" value="${esc(f)}" checked onclick="event.stopPropagation()" onchange="if(selectionMode)updateSelectionToolbar()">
       <span class="file-icon">${fileIcon(f)}</span>
       <span class="file-name" title="${esc(f)}">${esc(displayName)}</span>
       ${isNew ? '<span class="new-badge" style="flex-shrink:0">Neu</span>' : ''}
@@ -2485,14 +2732,48 @@ async function _renderPdf(container) {
   for (const page of pages) {
     if (gen !== _pdfGen) return; // superseded mid-render
     const viewport    = page.getViewport({ scale: scale * dpr }); // render at physical pixels
+    const cssW = (viewport.width  / dpr) + 'px';
+    const cssH = (viewport.height / dpr) + 'px';
+
+    // Wrapper — relative so text layer can be absolutely positioned on top
+    const wrapper = document.createElement('div');
+    wrapper.className = 'pdf-page-wrapper';
+    wrapper.style.width  = cssW;
+    wrapper.style.height = cssH;
+
     const canvas      = document.createElement('canvas');
     canvas.className  = 'pdf-page-canvas';
     canvas.width      = viewport.width;   // physical pixel size
     canvas.height     = viewport.height;
-    canvas.style.width  = (viewport.width  / dpr) + 'px'; // CSS display size
-    canvas.style.height = (viewport.height / dpr) + 'px';
-    container.appendChild(canvas);
+    canvas.style.width  = cssW;
+    canvas.style.height = cssH;
+    wrapper.appendChild(canvas);
+
+    // Text layer for selection
+    const textLayer = document.createElement('div');
+    textLayer.className = 'textLayer';
+    textLayer.style.width  = cssW;
+    textLayer.style.height = cssH;
+    wrapper.appendChild(textLayer);
+
+    container.appendChild(wrapper);
+
     await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+
+    // Render text at CSS scale (not physical), so positions match CSS pixels
+    const cssViewport = page.getViewport({ scale });
+    try {
+      const textContent = await page.getTextContent();
+      if (gen !== _pdfGen) return;
+      if (pdfjsLib.renderTextLayer) {
+        pdfjsLib.renderTextLayer({
+          textContentSource: textContent,
+          container: textLayer,
+          viewport: cssViewport,
+          textDivs: [],
+        });
+      }
+    } catch(_) { /* text layer is best-effort */ }
   }
 
   if (gen !== _pdfGen) return;
@@ -2584,18 +2865,27 @@ document.addEventListener('fullscreenchange', () => {
 
 function toggleSelectionMode() {
   selectionMode = !selectionMode;
-  const list = document.getElementById('file-list');
-  const btn = document.getElementById('selection-toggle-btn');
+  const list    = document.getElementById('file-list');
+  const btn     = document.getElementById('selection-toggle-btn');
+  const toolbar = document.getElementById('selection-toolbar');
+  const bulkRow = document.getElementById('bulk-read-row');
   list.classList.toggle('selection-mode', selectionMode);
   if (selectionMode) {
     btn.style.color = 'var(--blue)';
-    // select all when entering selection mode
+    btn.style.borderColor = 'var(--blue)';
+    btn.textContent = 'Fertig';
     allFilesChecked = true;
     document.querySelectorAll('input[name="file"]').forEach(cb => cb.checked = true);
+    toolbar.classList.add('visible');
+    if (bulkRow) bulkRow.style.display = 'none';
+    updateSelectionToolbar();
   } else {
     btn.style.color = 'var(--text3)';
-    // deselect all when leaving
+    btn.style.borderColor = 'var(--border)';
+    btn.textContent = 'Auswählen';
     document.querySelectorAll('input[name="file"]').forEach(cb => cb.checked = false);
+    toolbar.classList.remove('visible');
+    if (bulkRow) bulkRow.style.display = 'flex';
   }
 }
 
@@ -2678,16 +2968,21 @@ async function loadSummary(filename = null) {
         }).join('')}
       </div>` : '';
     el.innerHTML = `
-      <div class="summary-toolbar">
-        <div style="flex:1;min-width:0">
-          ${pickerHtml}
+      <div class="summary-layout" id="summary-layout">
+        <div class="summary-content-wrap">
+          <div class="summary-toolbar">
+            <div style="flex:1;min-width:0">
+              ${pickerHtml}
+            </div>
+            <button class="tbtn btn-gray" onclick="copyToClipboard(summaryMD)" title="Markdown kopieren">📋 Kopieren</button>
+            <a class="tbtn btn-gray" href="/api/summary-raw/${enc(activeCourse)}?file=${enc(activeFile)}" download style="text-decoration:none">⬇ Download</a>
+            <button class="tbtn btn-gray" onclick="switchTab('files')">Neu erstellen</button>
+          </div>
+          <div class="md-content" id="summary-md-content">${data.html}</div>
         </div>
-        <button class="tbtn btn-gray" onclick="copyToClipboard(summaryMD)" title="Markdown kopieren">📋 Kopieren</button>
-        <a class="tbtn btn-gray" href="/api/summary-raw/${enc(activeCourse)}?file=${enc(activeFile)}" download style="text-decoration:none">⬇ Download</a>
-        <button class="tbtn btn-gray" onclick="switchTab('files')">Neu erstellen</button>
-      </div>
-      <div class="md-content">${data.html}</div>`;
+      </div>`;
     window.summaryMD = data.md;
+    _buildAndInjectToC();
   } else {
     el.innerHTML = `
       <div class="empty-state">
@@ -3011,6 +3306,7 @@ function resetProgress() {
 document.addEventListener('keydown', e => {
   // Overlay close
   if (e.key === 'Escape') {
+    if (document.getElementById('cmd-overlay').classList.contains('open')) { closeCmdPalette(); return; }
     if (document.getElementById('shortcuts-overlay').classList.contains('open')) { hideShortcuts(); return; }
     if (document.getElementById('confirm-overlay').classList.contains('open')) { hideConfirm(); return; }
     goHome();
@@ -3029,10 +3325,10 @@ document.addEventListener('keydown', e => {
     if (document.getElementById('fullscreen-btn')) { togglePreviewFullscreen(); return; }
   }
 
-  // Ctrl+K → focus search
+  // Ctrl/Cmd+K → command palette
   if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
     e.preventDefault();
-    document.getElementById('search-global').focus();
+    document.getElementById('cmd-overlay').classList.contains('open') ? closeCmdPalette() : openCmdPalette();
     return;
   }
 
@@ -3503,6 +3799,211 @@ function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function enc(s) { return encodeURIComponent(s); }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Command Palette
+// ═══════════════════════════════════════════════════════════════════════════
+let _cmdIndex = 0;
+let _cmdItems = [];
+
+function openCmdPalette() {
+  document.getElementById('cmd-overlay').classList.add('open');
+  const input = document.getElementById('cmd-input');
+  input.value = '';
+  renderPaletteResults('');
+  setTimeout(() => input.focus(), 10);
+}
+
+function closeCmdPalette() {
+  document.getElementById('cmd-overlay').classList.remove('open');
+}
+
+function _buildPaletteItems(q) {
+  const items = [];
+  const ql = q.toLowerCase();
+
+  const actions = [
+    { icon: '🏠', label: 'Zur Übersicht',         meta: 'Navigation',   fn: () => goHome() },
+    { icon: '↓',  label: 'Neue Dateien laden',     meta: 'Sync',         fn: () => runScraper() },
+    { icon: '🧠', label: 'Alle Karten lernen',     meta: 'Lernen',       fn: () => startGlobalLearn() },
+    { icon: '⌨️', label: 'Tastenkürzel anzeigen',  meta: 'Hilfe',        fn: () => showShortcuts() },
+    { icon: '🌙', label: 'Hell/Dunkel wechseln',   meta: 'Einstellungen',fn: () => toggleTheme() },
+    { icon: '🔍', label: 'In Zusammenfassungen suchen', meta: 'Suche',   fn: () => { document.getElementById('search-global').focus(); } },
+  ];
+
+  if (activeCourse) {
+    const cname = activeCourse.split('/').pop();
+    actions.push(
+      { icon: '📁', label: `Dateien — ${cname}`,                meta: 'Tab',    fn: () => switchTab('files') },
+      { icon: '📄', label: `Zusammenfassung — ${cname}`,        meta: 'Tab',    fn: () => switchTab('summary') },
+      { icon: '🧠', label: `Lernen — ${cname}`,                 meta: 'Tab',    fn: () => switchTab('learn') },
+      { icon: '✏️', label: `Notizen — ${cname}`,                meta: 'Tab',    fn: () => switchTab('notes') },
+      { icon: '💬', label: `Fragen (KI) — ${cname}`,            meta: 'Tab',    fn: () => switchTab('chat') },
+      { icon: '✨', label: `Zusammenfassung erstellen — ${cname}`, meta: 'Aktion', fn: () => { switchTab('files'); setTimeout(() => generateSummary(false), 100); } },
+      { icon: '↓',  label: `Kurs synchronisieren — ${cname}`,   meta: 'Sync',   fn: () => syncCourse() },
+    );
+  }
+
+  const filteredActions = ql
+    ? actions.filter(a => a.label.toLowerCase().includes(ql) || (a.meta || '').toLowerCase().includes(ql))
+    : actions;
+
+  filteredActions.forEach(a => items.push({ type: 'action', ...a }));
+
+  const courses = allCourses
+    .filter(c => !ql || c.name.toLowerCase().includes(ql) || c.path.toLowerCase().includes(ql))
+    .slice(0, ql ? 20 : 8);
+
+  courses.forEach(c => items.push({
+    type: 'course',
+    icon: c.has_summary ? '📚' : '📁',
+    label: c.name,
+    meta: c.path.includes('/') ? c.path.split('/')[0] : '',
+    fn: () => selectCourse(c.path),
+  }));
+
+  return items;
+}
+
+function renderPaletteResults(q) {
+  _cmdItems = _buildPaletteItems(q);
+  _cmdIndex = 0;
+
+  const el = document.getElementById('cmd-results');
+  if (!_cmdItems.length) {
+    el.innerHTML = '<div id="cmd-empty">Keine Ergebnisse</div>';
+    return;
+  }
+
+  const actions = _cmdItems.filter(i => i.type === 'action');
+  const courses = _cmdItems.filter(i => i.type === 'course');
+
+  let html = '';
+  if (actions.length) {
+    html += `<div class="cmd-section">Aktionen</div>`;
+    actions.forEach(item => {
+      const idx = _cmdItems.indexOf(item);
+      html += `<div class="cmd-item${idx === _cmdIndex ? ' cmd-selected' : ''}" data-idx="${idx}"
+        onmouseenter="setCmdIndex(${idx})" onclick="executePaletteItem(${idx})">
+        <span class="cmd-item-icon">${item.icon}</span>
+        <span class="cmd-item-label">${esc(item.label)}</span>
+        ${item.meta ? `<span class="cmd-item-meta">${esc(item.meta)}</span>` : ''}
+      </div>`;
+    });
+  }
+  if (courses.length) {
+    html += `<div class="cmd-section">Kurse</div>`;
+    courses.forEach(item => {
+      const idx = _cmdItems.indexOf(item);
+      html += `<div class="cmd-item${idx === _cmdIndex ? ' cmd-selected' : ''}" data-idx="${idx}"
+        onmouseenter="setCmdIndex(${idx})" onclick="executePaletteItem(${idx})">
+        <span class="cmd-item-icon">${item.icon}</span>
+        <span class="cmd-item-label">${esc(item.label)}</span>
+        ${item.meta ? `<span class="cmd-item-meta">${esc(item.meta)}</span>` : ''}
+      </div>`;
+    });
+  }
+  el.innerHTML = html;
+}
+
+function setCmdIndex(i) {
+  _cmdIndex = i;
+  document.querySelectorAll('#cmd-results .cmd-item').forEach(el => {
+    el.classList.toggle('cmd-selected', parseInt(el.dataset.idx) === i);
+  });
+}
+
+function handlePaletteKey(e) {
+  if (e.key === 'Escape')     { closeCmdPalette(); return; }
+  if (e.key === 'ArrowDown')  { e.preventDefault(); setCmdIndex(Math.min(_cmdIndex + 1, _cmdItems.length - 1)); _scrollPaletteItem(); return; }
+  if (e.key === 'ArrowUp')    { e.preventDefault(); setCmdIndex(Math.max(_cmdIndex - 1, 0)); _scrollPaletteItem(); return; }
+  if (e.key === 'Enter')      { e.preventDefault(); executePaletteItem(_cmdIndex); return; }
+}
+
+function _scrollPaletteItem() {
+  const el = document.querySelector(`#cmd-results .cmd-item[data-idx="${_cmdIndex}"]`);
+  if (el) el.scrollIntoView({ block: 'nearest' });
+}
+
+function executePaletteItem(idx) {
+  const item = _cmdItems[idx];
+  if (!item) return;
+  closeCmdPalette();
+  setTimeout(() => item.fn(), 50);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Summary Table of Contents
+// ═══════════════════════════════════════════════════════════════════════════
+let _tocObserver = null;
+
+function _buildAndInjectToC() {
+  const layout    = document.getElementById('summary-layout');
+  const contentEl = document.getElementById('summary-md-content');
+  if (!layout || !contentEl) return;
+
+  const headings = [...contentEl.querySelectorAll('h2, h3')];
+  if (headings.length < 3) return; // too short to be worth a ToC
+
+  let html = '<div class="summary-toc"><div class="summary-toc-title">Inhalt</div>';
+  headings.forEach((h, i) => {
+    const id = `sh-${i}`;
+    h.id = id;
+    const cls = h.tagName === 'H3' ? 'toc-h3' : '';
+    html += `<a class="toc-link ${cls}" data-hid="${id}" href="#"
+      onclick="event.preventDefault();_scrollToSummaryHeading('${id}')"
+      >${esc(h.textContent.trim())}</a>`;
+  });
+  html += '</div>';
+
+  layout.insertAdjacentHTML('afterbegin', html);
+  _setupTocObserver();
+}
+
+function _scrollToSummaryHeading(id) {
+  const el    = document.getElementById(id);
+  const panel = document.getElementById('panel-summary');
+  if (el && panel) {
+    const offset = el.getBoundingClientRect().top - panel.getBoundingClientRect().top + panel.scrollTop - 60;
+    panel.scrollTo({ top: offset, behavior: 'smooth' });
+  }
+}
+
+function _setupTocObserver() {
+  if (_tocObserver) _tocObserver.disconnect();
+  const panel = document.getElementById('panel-summary');
+  if (!panel) return;
+  const headings = panel.querySelectorAll('[id^="sh-"]');
+  if (!headings.length) return;
+
+  _tocObserver = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      const link = panel.querySelector(`.toc-link[data-hid="${entry.target.id}"]`);
+      if (link) link.classList.toggle('toc-active', entry.isIntersecting);
+    });
+  }, { root: panel, rootMargin: '-5% 0px -75% 0px', threshold: 0 });
+
+  headings.forEach(h => _tocObserver.observe(h));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Selection toolbar helpers
+// ═══════════════════════════════════════════════════════════════════════════
+function updateSelectionToolbar() {
+  const count  = document.querySelectorAll('input[name="file"]:checked').length;
+  const countEl = document.getElementById('sel-count');
+  const sumBtn  = document.getElementById('sel-summarize-btn');
+  if (countEl) countEl.textContent = `${count} Datei${count !== 1 ? 'en' : ''} ausgewählt`;
+  if (sumBtn)  sumBtn.textContent  = `Ausgewählte zusammenfassen (${count})`;
+}
+
+function markSelectedFilesRead(read) {
+  document.querySelectorAll('input[name="file"]:checked').forEach(cb => {
+    setFileRead(activeCourse, cb.value, read);
+  });
+  if (read) _clearReadTimer();
+  filterAndRenderSidebar();
+}
 
 boot();
 </script>

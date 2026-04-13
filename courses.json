@@ -50,5 +50,70 @@
   "Alle Kurse/IKW Board Election 2026 (Students)": {
     "name": "IKW Board Election 2026 (Students)",
     "url": "https://studip.uni-osnabrueck.de/seminar_main.php?auswahl=61ec79102dc4bb242a20857f25726a8a"
+  },
+  "SoSe 2028/Blubb": {
+    "name": "Blubb",
+    "url": "https://studip.uni-osnabrueck.de/seminar_main.php?auswahl=c60e2c1c7be7ed7c04bee2c723127182",
+    "meta": {}
+  },
+  "SoSe 2028/FB08 - Fachbereichsratssitzung (unbegrenzt)": {
+    "name": "FB08 - Fachbereichsratssitzung (unbegrenzt)",
+    "url": "https://studip.uni-osnabrueck.de/seminar_main.php?auswahl=e798779444bf3d136beb6222c21335a4",
+    "meta": {}
+  },
+  "SoSe 2026/Action & Cognition (Motor System)": {
+    "name": "Action & Cognition (Motor System)",
+    "url": "https://studip.uni-osnabrueck.de/seminar_main.php?auswahl=53756255085ac18be3483a60aa13f43c",
+    "meta": {}
+  },
+  "SoSe 2026/Cognitive Science Tutor Applications": {
+    "name": "Cognitive Science Tutor Applications",
+    "url": "https://studip.uni-osnabrueck.de/seminar_main.php?auswahl=d58bebf2d4a6c9ab3fc4573bc84efd11",
+    "meta": {}
+  },
+  "SoSe 2026/Contemporary Topics in Biological Reinforcement Learning": {
+    "name": "Contemporary Topics in Biological Reinforcement Learning",
+    "url": "https://studip.uni-osnabrueck.de/seminar_main.php?auswahl=8a3fe2b73d839f2693fa0d413fc5552e",
+    "meta": {}
+  },
+  "SoSe 2026/Introduction to Deep Learning_ Theory and Practice": {
+    "name": "Introduction to Deep Learning: Theory and Practice",
+    "url": "https://studip.uni-osnabrueck.de/seminar_main.php?auswahl=4e85920f47a0695a25284c4093e68640",
+    "meta": {}
+  },
+  "SoSe 2026/Neural encoding with deep neural networks": {
+    "name": "Neural encoding with deep neural networks",
+    "url": "https://studip.uni-osnabrueck.de/seminar_main.php?auswahl=454228a879dc0fff3f729c74f49fb6a7",
+    "meta": {}
+  },
+  "SoSe 2026/Neurodynamics": {
+    "name": "Neurodynamics",
+    "url": "https://studip.uni-osnabrueck.de/seminar_main.php?auswahl=002cb51e62b168754cd1e2739e9de3b8",
+    "meta": {}
+  },
+  "SoSe 2026/Projects at the intersection of neuroscience and machine learning": {
+    "name": "Projects at the intersection of neuroscience and machine learning",
+    "url": "https://studip.uni-osnabrueck.de/seminar_main.php?auswahl=da5dd5bc33ea6bf46f29ebbab3be3e9b",
+    "meta": {}
+  },
+  "WiSe 2025_26/Advanced NLP": {
+    "name": "Advanced NLP",
+    "url": "https://studip.uni-osnabrueck.de/seminar_main.php?auswahl=558ea0bfac4f637ddccd579d576ef101",
+    "meta": {}
+  },
+  "WiSe 2025_26/B1 Italienisch für Alltag und Beruf": {
+    "name": "B1 Italienisch für Alltag und Beruf",
+    "url": "https://studip.uni-osnabrueck.de/seminar_main.php?auswahl=fa31db67059e652cebe2980fe3e9d444",
+    "meta": {}
+  },
+  "WiSe 2025_26/Foundations of NLP": {
+    "name": "Foundations of NLP",
+    "url": "https://studip.uni-osnabrueck.de/seminar_main.php?auswahl=7cb67bd0653552d502ade223e5c93caa",
+    "meta": {}
+  },
+  "WiSe 2025_26/IKW Board Election 2026 (Students)": {
+    "name": "IKW Board Election 2026 (Students)",
+    "url": "https://studip.uni-osnabrueck.de/seminar_main.php?auswahl=61ec79102dc4bb242a20857f25726a8a",
+    "meta": {}
   }
 }
