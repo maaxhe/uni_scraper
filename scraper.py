@@ -142,68 +142,109 @@ async def login(page: Page) -> None:
 # Semester course discovery
 # ---------------------------------------------------------------------------
 
-async def get_all_semester_courses(page: Page) -> list[dict]:
-    """
-    Parse the my_courses overview and return courses grouped by semester.
-    Uses Playwright's native locator API (more reliable than page.evaluate
-    for pages that render links inside iframes or shadow DOM).
-    """
-    # MY_COURSES_ALL_URL (?sem_select=all) acts as a redirect/settings call
-    # and returns an empty shell page without the course list.
-    # Scrape the regular my_courses page + the archive page instead.
-    pages_to_scrape = [
-        MY_COURSES_URL,
-        f"{STUDIP_BASE}/dispatch.php/my_courses/archive",
-    ]
-
+async def _scrape_courses_from_page(page: Page, seen_urls: set) -> list[dict]:
+    """Collect all course links from the currently loaded my_courses page."""
     SKIP_URL   = re.compile(r'wizard|logout|login|profile/|messages|calendar|settings|globalsearch|jsupdater|my_institutes|my_courses/store|my_courses/groups|tabularasa|mark_notification', re.IGNORECASE)
     COURSE_URL = re.compile(r'seminar_main\.php\?auswahl=|auswahl=[a-f0-9]{10}', re.IGNORECASE)
 
-    course_links: list[dict] = []
+    pairs = await page.evaluate("""() =>
+        [...document.querySelectorAll('a[href]')].map(a => ({
+            href: a.href,
+            name: a.textContent.trim()
+        }))
+    """)
+    log.info("  Scanning %s — %d anchors", page.url, len(pairs))
+
+    courses = []
+    for pair in pairs:
+        href = (pair.get('href') or '').strip()
+        name = (pair.get('name') or '').strip()
+        if not href or not name:
+            continue
+        if SKIP_URL.search(href):
+            continue
+        if not COURSE_URL.search(href):
+            continue
+        norm = re.sub(r'&redirect_to=[^&]*', '', href)
+        if norm in seen_urls:
+            continue
+        seen_urls.add(norm)
+        courses.append({"name": name, "url": norm})
+    return courses
+
+
+async def get_all_semester_courses(page: Page) -> list[dict]:
+    """
+    Return courses grouped by semester by switching the semester filter for
+    each recent semester and scraping the resulting my_courses page.
+    """
+    SET_SEM_URL = f"{STUDIP_BASE}/dispatch.php/my_courses/set_semester"
+    SEM_RE      = re.compile(r'(?:SoSe|WiSe)\s+\d{4}', re.IGNORECASE)
+
+    # ── Step 1: load the page and extract semester options from the filter ──
+    await page.goto(MY_COURSES_URL, wait_until="networkidle")
+    await page.wait_for_timeout(500)
+
+    semester_options = await page.evaluate("""() => {
+        const sel = document.querySelector('select[name="sem_select"]');
+        if (!sel) return [];
+        return [...sel.options]
+            .filter(o => /SoSe|WiSe/i.test(o.title || o.textContent))
+            .map(o => ({ id: o.value, name: (o.title || o.textContent).trim() }));
+    }""")
+
+    if not semester_options:
+        log.warning("Could not find semester filter — falling back to single-page scrape.")
+        seen: set[str] = set()
+        courses = await _scrape_courses_from_page(page, seen)
+        if not courses:
+            debug_path = Path(__file__).parent / "debug_page.html"
+            try:
+                debug_path.write_text(await page.content(), encoding="utf-8")
+                log.warning("No courses found — page HTML saved to %s", debug_path)
+            except Exception:
+                pass
+            log.warning("No courses found — try --no-headless to inspect the page.")
+            return []
+        log.info("Found %d course(s) total (no semester grouping)", len(courses))
+        return [{"semester": "Alle Kurse", "courses": courses}]
+
+    log.info("Found %d semester(s) in filter: %s",
+             len(semester_options), [s["name"] for s in semester_options[:5]])
+
+    # ── Step 2: for each semester, set filter → scrape ──────────────────────
+    # Only scrape recent semesters (skip far future/past beyond last 6)
+    MAX_SEMESTERS = 6
+    semesters_to_scrape = semester_options[:MAX_SEMESTERS]
+
+    results: list[dict] = []
     seen_urls: set[str] = set()
 
-    for url in pages_to_scrape:
-        await page.goto(url, wait_until="networkidle")
+    for sem in semesters_to_scrape:
+        sem_name = sem["name"]
+        sem_id   = sem["id"]
+
+        # Set the semester filter (GET request changes session state)
+        await page.goto(f"{SET_SEM_URL}?sem_select={sem_id}", wait_until="networkidle")
+        await page.wait_for_timeout(300)
+        await page.goto(MY_COURSES_URL, wait_until="networkidle")
         await page.wait_for_timeout(500)
 
-        # Collect all href+text pairs in a single JS call (much faster than
-        # iterating element handles one by one via the Playwright IPC bridge).
-        pairs = await page.evaluate("""() =>
-            [...document.querySelectorAll('a[href]')].map(a => ({
-                href: a.href,
-                name: a.textContent.trim()
-            }))
-        """)
-        log.info("Scanning %s — %d anchors", url, len(pairs))
+        log.info("── Semester: %s", sem_name)
+        courses = await _scrape_courses_from_page(page, seen_urls)
+        if courses:
+            log.info("  → %d course(s)", len(courses))
+            results.append({"semester": sem_name, "courses": courses})
+        else:
+            log.info("  → no courses")
 
-        for pair in pairs:
-            href = (pair.get('href') or '').strip()
-            name = (pair.get('name') or '').strip()
-            if not href or not name:
-                continue
-            if SKIP_URL.search(href):
-                continue
-            if not COURSE_URL.search(href):
-                continue
-            norm = re.sub(r'&redirect_to=[^&]*', '', href)
-            if norm in seen_urls:
-                continue
-            seen_urls.add(norm)
-            course_links.append({"name": name, "url": norm})
-
-    if not course_links:
-        debug_path = Path(__file__).parent / "debug_page.html"
-        try:
-            await page.goto(MY_COURSES_URL, wait_until="networkidle")
-            debug_path.write_text(await page.content(), encoding="utf-8")
-            log.warning("No courses found — page HTML saved to %s", debug_path)
-        except Exception:
-            pass
-        log.warning("No courses found — try --no-headless to inspect the page.")
+    total = sum(len(s["courses"]) for s in results)
+    if not total:
+        log.warning("No courses found in any semester.")
         return []
 
-    log.info("Found %d course(s) total", len(course_links))
-    return [{"semester": "Alle Kurse", "courses": course_links}]
+    log.info("Found %d course(s) across %d semester(s)", total, len(results))
+    return results
 
 
 # ---------------------------------------------------------------------------
