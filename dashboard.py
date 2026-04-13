@@ -2284,7 +2284,24 @@ function fileIcon(name) {
           py:'💻', js:'💻', ts:'💻', java:'💻', cpp:'💻', c:'💻'}[ext] || '📄';
 }
 
-const PREVIEWABLE_EXT = new Set(['pdf','doc','docx','ppt','pptx','txt','md','py','js','ts','java','cpp','c','h','css','html','json','xml','csv']);
+const PREVIEWABLE_EXT  = new Set(['pdf','doc','docx','ppt','pptx','txt','md','py','js','ts','java','cpp','c','h','css','html','json','xml','csv']);
+const IMAGE_EXT        = new Set(['jpg','jpeg','png','gif','svg','webp','bmp','ico']);
+const AUDIO_EXT        = new Set(['mp3','wav','ogg','m4a','aac','flac']);
+const VIDEO_EXT        = new Set(['mp4','webm','mov','avi','mkv']);
+
+function _downloadPlaceholder(filename, rawUrl, errorMsg) {
+  const name = filename.split('/').pop();
+  return `<div class="preview-placeholder">
+    <div class="icon">${fileIcon(filename)}</div>
+    <div style="margin-bottom:6px;color:var(--text2);font-weight:500">${esc(name)}</div>
+    ${errorMsg ? `<div style="font-size:11px;color:var(--red);margin-bottom:12px">${esc(errorMsg)}</div>`
+               : `<div style="font-size:12px;color:var(--text3);margin-bottom:16px">Keine Vorschau verfügbar</div>`}
+    <a href="${rawUrl}" download
+       style="background:var(--blue);color:#fff;padding:9px 22px;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600">
+      ⬇ Herunterladen
+    </a>
+  </div>`;
+}
 
 let _readTimer = null;
 let _readTimerFile = null;
@@ -2340,27 +2357,58 @@ async function previewFile(filename) {
   body.innerHTML = '<div class="preview-placeholder"><div class="icon">⏳</div><div>Lade…</div></div>';
   body.className = 'preview-body';
 
+  const rawUrl = `/api/file-raw/${enc(activeCourse)}/${enc(filename)}`;
+
   if (isPdf) {
-    _pdfScale = null; // null = auto-fit
-    _pdfUrl = `/api/file-raw/${enc(activeCourse)}/${enc(filename)}`;
+    _pdfScale = null;
+    _pdfUrl = rawUrl;
     body.className = 'preview-body pdf-wrap';
     body.innerHTML = '';
     await _loadPdfJs(body);
     _setupPdfResizeObserver(body);
     _setupPdfWheelZoom(body);
+  } else if (IMAGE_EXT.has(ext)) {
+    body.className = 'preview-body';
+    body.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:20px">
+      <img src="${rawUrl}" alt="${esc(filename.split('/').pop())}"
+           style="max-width:100%;max-height:70vh;border-radius:6px;box-shadow:var(--shadow)">
+      <a href="${rawUrl}" download style="font-size:12px;color:var(--text3)">⬇ Herunterladen</a>
+    </div>`;
+  } else if (AUDIO_EXT.has(ext)) {
+    body.className = 'preview-body';
+    body.innerHTML = `<div class="preview-placeholder">
+      <div class="icon">🎵</div>
+      <div style="margin-bottom:16px;color:var(--text2)">${esc(filename.split('/').pop())}</div>
+      <audio controls style="width:100%;max-width:400px">
+        <source src="${rawUrl}">
+        Dein Browser unterstützt kein Audio-Playback.
+      </audio>
+      <a href="${rawUrl}" download style="margin-top:12px;font-size:12px;color:var(--text3)">⬇ Herunterladen</a>
+    </div>`;
+  } else if (VIDEO_EXT.has(ext)) {
+    body.className = 'preview-body';
+    body.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:20px">
+      <video controls style="max-width:100%;max-height:70vh;border-radius:6px;box-shadow:var(--shadow)">
+        <source src="${rawUrl}">
+        Dein Browser unterstützt kein Video-Playback.
+      </video>
+      <a href="${rawUrl}" download style="font-size:12px;color:var(--text3)">⬇ Herunterladen</a>
+    </div>`;
   } else if (PREVIEWABLE_EXT.has(ext)) {
     const data = await fetch(`/api/file-text/${enc(activeCourse)}/${enc(filename)}`).then(r => r.json());
-    body.innerHTML = esc(data.text || '(Kein Text lesbar)');
+    const text = data.text || '';
+    if (text && !text.startsWith('Fehler')) {
+      body.className = 'preview-body';
+      body.innerHTML = `<div style="margin-bottom:12px;text-align:right">
+        <a href="${rawUrl}" download style="font-size:11px;color:var(--text3);text-decoration:none">⬇ Herunterladen</a>
+      </div>${esc(text)}`;
+    } else {
+      body.className = 'preview-body';
+      body.innerHTML = _downloadPlaceholder(filename, rawUrl, text || '');
+    }
   } else {
-    body.innerHTML = `<div class="preview-placeholder">
-      <div class="icon">${fileIcon(filename)}</div>
-      <div style="margin-bottom:12px;color:var(--text2)">${esc(filename.split('/').pop())}</div>
-      <div style="font-size:12px;color:var(--text3);margin-bottom:16px">Dieses Format kann nicht in der Vorschau angezeigt werden.</div>
-      <a href="/api/file-raw/${enc(activeCourse)}/${enc(filename)}" download
-         style="background:var(--blue);color:#fff;padding:8px 18px;border-radius:6px;text-decoration:none;font-size:13px">
-        ⬇ Herunterladen
-      </a>
-    </div>`;
+    body.className = 'preview-body';
+    body.innerHTML = _downloadPlaceholder(filename, rawUrl, '');
   }
   _startReadTimer(filename);
 }
