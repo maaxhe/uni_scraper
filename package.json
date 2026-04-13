@@ -1,0 +1,8 @@
+{
+  "name": "uni-scraper",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "/opt/homebrew/bin/python3 dashboard.py",
+    "build": "bash run_pipeline.sh"
+  }
+}

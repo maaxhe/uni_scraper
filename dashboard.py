@@ -991,9 +991,11 @@ body {
 .file-item:hover { background: var(--bg3); }
 .file-item.active { background: var(--bg4); border-color: rgba(79,142,247,.4); }
 .file-item.new-file { border-color: rgba(251,191,36,.35); background: rgba(251,191,36,.06); }
-.file-item input[type=checkbox] { accent-color: var(--blue); flex-shrink: 0; cursor: pointer; }
+.file-item input[type=checkbox] { accent-color: var(--blue); flex-shrink: 0; cursor: pointer; display: none; }
+#file-list.selection-mode .file-item input[type=checkbox] { display: inline-block; }
 .file-icon { font-size: 14px; flex-shrink: 0; }
 .file-name { font-size: 12px; color: var(--text2); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.file-date { font-size: 10px; color: var(--text3); flex-shrink: 0; }
 
 /* Folder tree */
 .folder-item {
@@ -1501,7 +1503,7 @@ body {
           <div class="files-list-col" id="files-list-col">
             <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
               <span style="font-size:12px;font-weight:600;color:var(--text3);">DATEIEN</span>
-              <button style="font-size:11px;color:var(--blue);background:none;border:none;cursor:pointer;" onclick="toggleAllFiles()">Alle</button>
+              <button id="selection-toggle-btn" style="font-size:11px;color:var(--text3);background:none;border:none;cursor:pointer;" onclick="toggleSelectionMode()">Auswählen</button>
             </div>
             <div id="file-list"></div>
             <div class="file-actions">
@@ -1646,6 +1648,7 @@ let activeTab      = 'home';
 let flashState     = { cards: [], index: 0, revealed: false, progress: {}, timerStart: null, timerInterval: null, isGlobal: false };
 let notesSaveTimer = null;
 let allFilesChecked = true;
+let selectionMode = false;
 let sidebarFilter  = 'all';
 let sidebarSort    = 'name';
 let notesPreviewMode = false;
@@ -1997,6 +2000,11 @@ async function selectCourse(path) {
   document.getElementById('tabs').style.display = 'flex';
   document.getElementById('course-title-bar').style.display = 'flex';
   document.getElementById('course-title-text').textContent = path.split('/').pop();
+  // reset selection mode on course change
+  selectionMode = false;
+  const selBtn = document.getElementById('selection-toggle-btn');
+  if (selBtn) { selBtn.style.color = 'var(--text3)'; }
+  document.getElementById('file-list')?.classList.remove('selection-mode');
   switchTab('files');
   loadFiles();
 }
@@ -2094,6 +2102,7 @@ function renderFileTree(node, allFiles, summaryAge, metaMap, depth) {
     const m = metaMap[f] || {};
     const isNew = summaryAge && m.mtime && m.mtime > summaryAge;
     const displayName = f.split('/').pop();
+    const dateStr = m.mtime ? formatFileDate(m.mtime) : '';
     html += `
     <div class="file-item${isNew ? ' new-file' : ''}" data-filename="${esc(f)}"
          style="padding-left:${8 + indent}px" onclick="previewFileFromEl(this)">
@@ -2101,6 +2110,7 @@ function renderFileTree(node, allFiles, summaryAge, metaMap, depth) {
       <span class="file-icon">${fileIcon(f)}</span>
       <span class="file-name" title="${esc(f)}">${esc(displayName)}</span>
       ${isNew ? '<span class="new-badge" style="flex-shrink:0">Neu</span>' : ''}
+      ${dateStr ? `<span class="file-date">${dateStr}</span>` : ''}
     </div>`;
   }
 
@@ -2135,6 +2145,16 @@ function toggleFileFolder(path, headerEl) {
 }
 
 function previewFileFromEl(el) { previewFile(el.dataset.filename); }
+
+function formatFileDate(mtime) {
+  const d = new Date(mtime * 1000);
+  const now = new Date();
+  const diffDays = Math.floor((now - d) / 86400000);
+  if (diffDays === 0) return 'Heute';
+  if (diffDays === 1) return 'Gestern';
+  if (diffDays < 7) return d.toLocaleDateString('de-DE', { weekday: 'short' });
+  return d.toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit', year: '2-digit' });
+}
 
 function fileIcon(name) {
   const ext = name.split('.').pop().toLowerCase();
@@ -2349,12 +2369,30 @@ document.addEventListener('fullscreenchange', () => {
   }, 150);
 });
 
+function toggleSelectionMode() {
+  selectionMode = !selectionMode;
+  const list = document.getElementById('file-list');
+  const btn = document.getElementById('selection-toggle-btn');
+  list.classList.toggle('selection-mode', selectionMode);
+  if (selectionMode) {
+    btn.style.color = 'var(--blue)';
+    // select all when entering selection mode
+    allFilesChecked = true;
+    document.querySelectorAll('input[name="file"]').forEach(cb => cb.checked = true);
+  } else {
+    btn.style.color = 'var(--text3)';
+    // deselect all when leaving
+    document.querySelectorAll('input[name="file"]').forEach(cb => cb.checked = false);
+  }
+}
+
 function toggleAllFiles() {
   allFilesChecked = !allFilesChecked;
   document.querySelectorAll('input[name="file"]').forEach(cb => cb.checked = allFilesChecked);
 }
 
 function getSelectedFiles() {
+  if (!selectionMode) return [...document.querySelectorAll('input[name="file"]')].map(cb => cb.value);
   return [...document.querySelectorAll('input[name="file"]:checked')].map(cb => cb.value);
 }
 
