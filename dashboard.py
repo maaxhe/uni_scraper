@@ -996,6 +996,19 @@ body {
 .file-icon { font-size: 14px; flex-shrink: 0; }
 .file-name { font-size: 12px; color: var(--text2); flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .file-date { font-size: 10px; color: var(--text3); flex-shrink: 0; }
+.file-read-check { font-size: 11px; color: var(--green, #4ade80); flex-shrink: 0; opacity: 0.85; }
+.file-item.file-read .file-name { color: var(--text3); }
+.read-toggle-btn {
+  font-size: 11px; padding: 2px 8px; border-radius: 5px; border: 1px solid var(--border);
+  background: none; color: var(--text3); cursor: pointer; flex-shrink: 0; transition: all .15s;
+  white-space: nowrap;
+}
+.read-toggle-btn.is-read { color: var(--green, #4ade80); border-color: var(--green, #4ade80); }
+.read-timer-bar {
+  position: absolute; bottom: 0; left: 0; height: 2px;
+  background: var(--blue); width: 0%; transition: width 1s linear; border-radius: 0 0 0 var(--radius-lg);
+}
+.preview-header { position: relative; }
 
 /* Folder tree */
 .folder-item {
@@ -1656,6 +1669,28 @@ let notesPreviewMode = false;
 // ═══════════════════════════════════════════════════════════════════════════
 // Favorites
 // ═══════════════════════════════════════════════════════════════════════════
+// ── Read-state helpers ───────────────────────────────────────────────────
+function _readKey(course) { return 'read_files__' + course; }
+function getReadSet(course) {
+  try { return new Set(JSON.parse(localStorage.getItem(_readKey(course)) || '[]')); } catch { return new Set(); }
+}
+function saveReadSet(course, set) { localStorage.setItem(_readKey(course), JSON.stringify([...set])); }
+function isFileRead(course, filename) { return getReadSet(course).has(filename); }
+function setFileRead(course, filename, read) {
+  const s = getReadSet(course);
+  if (read) s.add(filename); else s.delete(filename);
+  saveReadSet(course, s);
+  // Update DOM immediately
+  document.querySelectorAll(`.file-item[data-filename="${CSS.escape(filename)}"]`).forEach(el => {
+    el.classList.toggle('file-read', read);
+    const chk = el.querySelector('.file-read-check');
+    if (chk) chk.textContent = read ? '✓' : '';
+  });
+  // Update preview header button
+  const btn = document.getElementById('read-toggle-btn');
+  if (btn) { btn.textContent = read ? '✓ Gelesen' : 'Als gelesen markieren'; btn.classList.toggle('is-read', read); }
+}
+
 function getFavorites() {
   try { return JSON.parse(localStorage.getItem('fav_courses') || '[]'); } catch { return []; }
 }
@@ -2103,14 +2138,16 @@ function renderFileTree(node, allFiles, summaryAge, metaMap, depth) {
     const isNew = summaryAge && m.mtime && m.mtime > summaryAge;
     const displayName = f.split('/').pop();
     const dateStr = m.mtime ? formatFileDate(m.mtime) : '';
+    const read = isFileRead(activeCourse, f);
     html += `
-    <div class="file-item${isNew ? ' new-file' : ''}" data-filename="${esc(f)}"
+    <div class="file-item${isNew ? ' new-file' : ''}${read ? ' file-read' : ''}" data-filename="${esc(f)}"
          style="padding-left:${8 + indent}px" onclick="previewFileFromEl(this)">
       <input type="checkbox" name="file" value="${esc(f)}" checked onclick="event.stopPropagation()">
       <span class="file-icon">${fileIcon(f)}</span>
       <span class="file-name" title="${esc(f)}">${esc(displayName)}</span>
       ${isNew ? '<span class="new-badge" style="flex-shrink:0">Neu</span>' : ''}
       ${dateStr ? `<span class="file-date">${dateStr}</span>` : ''}
+      <span class="file-read-check">${read ? '✓' : ''}</span>
     </div>`;
   }
 
@@ -2167,7 +2204,40 @@ function fileIcon(name) {
 
 const PREVIEWABLE_EXT = new Set(['pdf','doc','docx','ppt','pptx','txt','md','py','js','ts','java','cpp','c','h','css','html','json','xml','csv']);
 
+let _readTimer = null;
+let _readTimerFile = null;
+
+function _clearReadTimer() {
+  if (_readTimer) { clearInterval(_readTimer); _readTimer = null; }
+  _readTimerFile = null;
+  const bar = document.getElementById('read-timer-bar');
+  if (bar) bar.remove();
+}
+
+function _startReadTimer(filename) {
+  _clearReadTimer();
+  if (isFileRead(activeCourse, filename)) return; // already read
+  _readTimerFile = filename;
+  const header = document.getElementById('preview-header');
+  const bar = document.createElement('div');
+  bar.id = 'read-timer-bar';
+  bar.className = 'read-timer-bar';
+  header.appendChild(bar);
+  const DURATION = 20; // seconds
+  let elapsed = 0;
+  // trigger CSS transition after paint
+  requestAnimationFrame(() => { bar.style.width = '100%'; bar.style.transition = `width ${DURATION}s linear`; });
+  _readTimer = setInterval(() => {
+    elapsed++;
+    if (elapsed >= DURATION) {
+      _clearReadTimer();
+      if (_readTimerFile === filename) setFileRead(activeCourse, filename, true);
+    }
+  }, 1000);
+}
+
 async function previewFile(filename) {
+  _clearReadTimer();
   document.querySelectorAll('.file-item').forEach(el => {
     el.classList.toggle('active', el.dataset.filename === filename);
   });
@@ -2175,10 +2245,11 @@ async function previewFile(filename) {
   const ext = filename.split('.').pop().toLowerCase();
   const header = document.getElementById('preview-header');
   const body   = document.getElementById('preview-body');
+  const read = isFileRead(activeCourse, filename);
 
   const isPdf = ext === 'pdf';
   header.innerHTML = `
-    <span class="preview-header-name">${esc(filename)}</span>
+    <span class="preview-header-name">${esc(filename.split('/').pop())}</span>
     ${isPdf ? `
       <span id="pdf-page-ind" style="font-size:11px;color:var(--text3);flex-shrink:0"></span>
       <div class="zoom-controls">
@@ -2186,6 +2257,8 @@ async function previewFile(filename) {
         <span class="zoom-label" id="zoom-label">Auto</span>
         <button class="zoom-btn" onclick="changePdfZoom(20)" title="Vergrößern">+</button>
       </div>` : ''}
+    <button id="read-toggle-btn" class="read-toggle-btn${read ? ' is-read' : ''}"
+      onclick="toggleReadFile('${esc(filename)}')">${read ? '✓ Gelesen' : 'Als gelesen markieren'}</button>
     <a href="/api/file-raw/${enc(activeCourse)}/${enc(filename)}" download title="Herunterladen"
        style="color:var(--text3);font-size:13px;text-decoration:none" onclick="event.stopPropagation()">⬇</a>
     ${isPdf ? `<button id="fullscreen-btn" onclick="togglePreviewFullscreen()" title="Vollbild (F)">⛶</button>` : ''}`;
@@ -2214,6 +2287,14 @@ async function previewFile(filename) {
       </a>
     </div>`;
   }
+  _startReadTimer(filename);
+}
+
+function toggleReadFile(filename) {
+  const nowRead = !isFileRead(activeCourse, filename);
+  setFileRead(activeCourse, filename, nowRead);
+  if (nowRead) _clearReadTimer(); // already manually marked — stop timer
+  else _startReadTimer(filename); // unmarked — restart timer
 }
 
 // ── PDF.js state ─────────────────────────────────────────────────────────
