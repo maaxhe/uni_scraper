@@ -1004,10 +1004,6 @@ body {
   white-space: nowrap;
 }
 .read-toggle-btn.is-read { color: var(--green, #4ade80); border-color: var(--green, #4ade80); }
-.read-timer-bar {
-  position: absolute; bottom: 0; left: 0; height: 2px;
-  background: var(--blue); width: 0%; transition: width 1s linear; border-radius: 0 0 0 var(--radius-lg);
-}
 .preview-header { position: relative; }
 
 /* Folder tree */
@@ -2247,23 +2243,14 @@ let _readTimerFile = null;
 function _clearReadTimer() {
   if (_readTimer) { clearInterval(_readTimer); _readTimer = null; }
   _readTimerFile = null;
-  const bar = document.getElementById('read-timer-bar');
-  if (bar) bar.remove();
 }
 
 function _startReadTimer(filename) {
   _clearReadTimer();
-  if (isFileRead(activeCourse, filename)) return; // already read
+  if (isFileRead(activeCourse, filename)) return;
   _readTimerFile = filename;
-  const header = document.getElementById('preview-header');
-  const bar = document.createElement('div');
-  bar.id = 'read-timer-bar';
-  bar.className = 'read-timer-bar';
-  header.appendChild(bar);
   const DURATION = 20; // seconds
   let elapsed = 0;
-  // trigger CSS transition after paint
-  requestAnimationFrame(() => { bar.style.width = '100%'; bar.style.transition = `width ${DURATION}s linear`; });
   _readTimer = setInterval(() => {
     elapsed++;
     if (elapsed >= DURATION) {

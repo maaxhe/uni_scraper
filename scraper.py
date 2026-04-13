@@ -368,14 +368,24 @@ async def _fetch_course_meta(api, cid: str) -> dict:
     lecturers_raw = data.get("members", {}) or data.get("lecturers", {}) or {}
     # The API may return a flat list or a nested dict depending on the endpoint version
     lecturers: list[str] = []
+    def _extract_name(v):
+        if not isinstance(v, dict):
+            return ""
+        raw = v.get("name")
+        if isinstance(raw, dict):
+            return raw.get("formatted") or ""
+        if isinstance(raw, str):
+            return raw
+        return v.get("fullname") or ""
+
     if isinstance(lecturers_raw, dict):
         for v in lecturers_raw.values():
-            name = (v.get("name") or {}).get("formatted") or v.get("fullname") or ""
+            name = _extract_name(v)
             if name:
                 lecturers.append(name)
     elif isinstance(lecturers_raw, list):
         for v in lecturers_raw:
-            name = (v.get("name") or {}).get("formatted") or v.get("fullname") or ""
+            name = _extract_name(v)
             if name:
                 lecturers.append(name)
 
