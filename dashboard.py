@@ -621,6 +621,38 @@ HTML = r"""<!DOCTYPE html>
   --glow-blue: 0 0 20px rgba(79,142,247,.15);
 }
 
+:root.light {
+  --bg:        #f3f5fb;
+  --bg2:       #ffffff;
+  --bg3:       #eaecf4;
+  --bg4:       #dfe2ef;
+  --bg5:       #d3d7e8;
+  --border:    #d8dbe8;
+  --border2:   #c4c8da;
+  --text:      #111827;
+  --text2:     #374151;
+  --text3:     #6b7280;
+  --blue:      #2563eb;
+  --blue2:     #1d4ed8;
+  --blue3:     #1e40af;
+  --green:     #059669;
+  --yellow:    #d97706;
+  --red:       #dc2626;
+  --purple:    #7c3aed;
+  --orange:    #ea580c;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,.08);
+  --shadow:    0 4px 16px rgba(0,0,0,.1);
+  --shadow-lg: 0 8px 32px rgba(0,0,0,.12);
+  --glow-blue: 0 0 20px rgba(37,99,235,.12);
+}
+:root.light #topbar {
+  box-shadow: 0 1px 0 var(--border), 0 2px 8px rgba(0,0,0,.06);
+}
+:root.light .preview-body.pdf-wrap { background: #888; }
+:root.light .btn-blue { box-shadow: 0 2px 8px rgba(37,99,235,.25); }
+:root.light #topbar-logo { text-shadow: none; }
+:root.light .dot-ok { box-shadow: 0 0 5px rgba(5,150,105,.35); }
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
   background: var(--bg);
@@ -1423,6 +1455,7 @@ body {
   <input id="search-global" type="text" placeholder="🔍  Suche in allen Zusammenfassungen… (Ctrl+K)" oninput="handleGlobalSearch(event)">
   <button class="tbtn btn-gray topbar-home" onclick="goHome()" title="Übersicht (Esc)"><span class="tbtn-label">Übersicht</span></button>
   <button class="tbtn btn-gray topbar-shortcuts" onclick="showShortcuts()" title="Tastenkürzel anzeigen (?)">⌨️</button>
+  <button class="tbtn btn-gray" id="theme-toggle-btn" onclick="toggleTheme()" title="Hell/Dunkel wechseln">🌙</button>
   <button class="tbtn btn-blue" id="scrape-btn" onclick="runScraper()">↓<span class="tbtn-label"> Neue Dateien</span></button>
 </div>
 
@@ -1674,6 +1707,22 @@ let notesPreviewMode = false;
 // ═══════════════════════════════════════════════════════════════════════════
 // Favorites
 // ═══════════════════════════════════════════════════════════════════════════
+function applyFontSize() {} // placeholder — font size is fixed for now
+
+// ── Theme ────────────────────────────────────────────────────────────────
+function applyTheme(light) {
+  document.documentElement.classList.toggle('light', light);
+  const btn = document.getElementById('theme-toggle-btn');
+  if (btn) btn.textContent = light ? '🌑' : '🌙';
+}
+function toggleTheme() {
+  const isLight = document.documentElement.classList.contains('light');
+  localStorage.setItem('theme', isLight ? 'dark' : 'light');
+  applyTheme(!isLight);
+}
+// Apply saved theme immediately (before boot) to avoid flash
+applyTheme(localStorage.getItem('theme') === 'light');
+
 // ── Read-state helpers ───────────────────────────────────────────────────
 function _readKey(course) { return 'read_files__' + course; }
 function getReadSet(course) {
