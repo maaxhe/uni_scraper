@@ -1514,12 +1514,20 @@ body {
       <div class="panel" id="panel-files">
         <div class="files-layout" id="files-layout">
           <div class="files-list-col" id="files-list-col">
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
-              <span style="font-size:12px;font-weight:600;color:var(--text3);">DATEIEN</span>
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;">
+              <span style="font-size:12px;font-weight:600;color:var(--text3);flex:1">DATEIEN</span>
+              <select id="file-sort-select" class="sort-select" style="font-size:10px;padding:2px 4px;max-width:90px" onchange="setFileSort(this.value)">
+                <option value="name">Name</option>
+                <option value="date">Datum</option>
+              </select>
               <button id="selection-toggle-btn" style="font-size:11px;color:var(--text3);background:none;border:none;cursor:pointer;" onclick="toggleSelectionMode()">Auswählen</button>
             </div>
             <div id="file-list"></div>
             <div class="file-actions">
+              <div style="display:flex;gap:6px;margin-bottom:4px">
+                <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markAllFilesRead(true)">✓ Alle gelesen</button>
+                <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markAllFilesRead(false)">↺ Alle ungelesen</button>
+              </div>
               <div class="limit-row">
                 Max. Dateien: <input class="limit-input" id="limit-input" type="number" value="3" min="1" max="50">
               </div>
@@ -1576,7 +1584,6 @@ body {
             <div style="flex:1"></div>
             <span id="notes-saved"></span>
             <button class="tbtn btn-gray" id="notes-preview-btn" onclick="toggleNotesPreview()">Vorschau</button>
-            <button class="tbtn btn-blue" onclick="saveNotes()">Speichern</button>
           </div>
           <textarea id="notes-editor" placeholder="Eigene Notizen, Fragen, Zusammenhänge… (Markdown wird unterstützt)"></textarea>
           <div id="notes-preview" class="md-content"></div>
@@ -1627,6 +1634,8 @@ body {
     <div class="shortcut-row"><kbd>Space</kbd>      <span class="shortcut-desc">Antwort anzeigen</span></div>
     <div class="shortcut-row"><kbd>→ / k</kbd>      <span class="shortcut-desc">Gewusst</span></div>
     <div class="shortcut-row"><kbd>← / u</kbd>      <span class="shortcut-desc">Nicht gewusst</span></div>
+    <div class="shortcuts-section">Dateien</div>
+    <div class="shortcut-row"><kbd>R</kbd>          <span class="shortcut-desc">Als gelesen markieren (toggle)</span></div>
     <div class="shortcuts-section">Navigation</div>
     <div class="shortcut-row"><kbd>1</kbd>          <span class="shortcut-desc">Tab Dateien</span></div>
     <div class="shortcut-row"><kbd>2</kbd>          <span class="shortcut-desc">Tab Zusammenfassung</span></div>
@@ -1806,14 +1815,17 @@ function renderSidebar(tree) {
     const lastStudied = c.progress.last_studied
       ? new Date(c.progress.last_studied).toLocaleDateString('de-DE', {day:'2-digit', month:'2-digit'})
       : null;
+    const readCount = c.file_count > 0 ? getReadSet(c.path).size : 0;
+    const allRead = c.file_count > 0 && readCount >= c.file_count;
     return `
     <div class="citem ${activeCourse === c.path ? 'active' : ''}" data-course="${esc(c.path)}" onclick="selectCourseFromEl(this)"
          style="${indent ? 'padding-left:22px' : ''}">
       <div class="citem-dot ${c.has_summary ? 'dot-ok' : 'dot-missing'}"></div>
       <div class="citem-body">
-        <div class="citem-name" title="${esc(c.name)}">${esc(c.name)}${c.new_files ? `<span class="new-badge">+${c.new_files}</span>` : ''}</div>
+        <div class="citem-name" title="${esc(c.name)}">${esc(c.name)}${c.new_files ? `<span class="new-badge">+${c.new_files}</span>` : ''}${allRead ? `<span style="color:var(--green);font-size:10px;margin-left:4px" title="Alle Dateien gelesen">✓</span>` : ''}</div>
         <div class="citem-meta">
           <span>${c.file_count} Datei${c.file_count !== 1 ? 'en' : ''}</span>
+          ${readCount > 0 && !allRead ? `<span style="color:var(--text3)">${readCount}/${c.file_count} gel.</span>` : ''}
           ${c.has_summary ? `<span style="color:var(--green)">✓</span>` : ''}
           ${c.has_notes   ? `<span style="color:var(--purple)">📝</span>` : ''}
           ${lastStudied   ? `<span title="Zuletzt gelernt">🕐 ${lastStudied}</span>` : ''}
@@ -2067,6 +2079,17 @@ function showPanel(name) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Files tab
 // ═══════════════════════════════════════════════════════════════════════════
+let fileSort = localStorage.getItem('file_sort') || 'name';
+let activePreviewFile = null;
+
+function setFileSort(val) {
+  fileSort = val;
+  localStorage.setItem('file_sort', val);
+  const sel = document.getElementById('file-sort-select');
+  if (sel) sel.value = val;
+  loadFiles();
+}
+
 async function loadFiles() {
   const [files, meta] = await Promise.all([
     fetch(`/api/files/${enc(activeCourse)}`).then(r => r.json()),
@@ -2078,6 +2101,14 @@ async function loadFiles() {
     return;
   }
   const metaMap = Object.fromEntries((meta || []).map(m => [m.name, m]));
+
+  // Apply sort
+  const sel = document.getElementById('file-sort-select');
+  if (sel) sel.value = fileSort;
+  if (fileSort === 'date') {
+    files.sort((a, b) => (metaMap[b]?.mtime || 0) - (metaMap[a]?.mtime || 0));
+  }
+
   // Find summary age for highlighting new files
   const course = allCourses.find(c => c.path === activeCourse);
   const summaryAge = course?.summary_age || 0;
@@ -2091,6 +2122,12 @@ async function loadFiles() {
     : '';
 
   el.innerHTML = banner + renderFileTree(buildFileTree(files), files, summaryAge, metaMap, 0);
+
+  // Re-open last viewed file
+  const lastFile = localStorage.getItem('last_file__' + activeCourse);
+  if (lastFile && files.includes(lastFile)) {
+    previewFile(lastFile);
+  }
 }
 
 // Build a nested tree from flat relative paths
@@ -2231,13 +2268,15 @@ function _startReadTimer(filename) {
     elapsed++;
     if (elapsed >= DURATION) {
       _clearReadTimer();
-      if (_readTimerFile === filename) setFileRead(activeCourse, filename, true);
+      if (_readTimerFile === filename) { setFileRead(activeCourse, filename, true); filterAndRenderSidebar(); }
     }
   }, 1000);
 }
 
 async function previewFile(filename) {
   _clearReadTimer();
+  activePreviewFile = filename;
+  localStorage.setItem('last_file__' + activeCourse, filename);
   document.querySelectorAll('.file-item').forEach(el => {
     el.classList.toggle('active', el.dataset.filename === filename);
   });
@@ -2290,11 +2329,20 @@ async function previewFile(filename) {
   _startReadTimer(filename);
 }
 
+function markAllFilesRead(read) {
+  const items = document.querySelectorAll('.file-item[data-filename]');
+  items.forEach(el => setFileRead(activeCourse, el.dataset.filename, read));
+  if (read) _clearReadTimer();
+  else if (activePreviewFile) _startReadTimer(activePreviewFile);
+  filterAndRenderSidebar(); // update completion indicator
+}
+
 function toggleReadFile(filename) {
   const nowRead = !isFileRead(activeCourse, filename);
   setFileRead(activeCourse, filename, nowRead);
-  if (nowRead) _clearReadTimer(); // already manually marked — stop timer
-  else _startReadTimer(filename); // unmarked — restart timer
+  if (nowRead) _clearReadTimer();
+  else _startReadTimer(filename);
+  filterAndRenderSidebar(); // update completion indicator
 }
 
 // ── PDF.js state ─────────────────────────────────────────────────────────
@@ -2911,6 +2959,10 @@ document.addEventListener('keydown', e => {
     if (e.key === '3') { switchTab('learn'); return; }
     if (e.key === '4') { switchTab('notes'); return; }
     if (e.key === '5') { switchTab('chat'); return; }
+    // R = toggle read on active preview file
+    if (e.key === 'r' && activeTab === 'files' && activePreviewFile) {
+      toggleReadFile(activePreviewFile); return;
+    }
   }
 
   // Flashcard shortcuts
@@ -3135,7 +3187,7 @@ document.addEventListener('input', e => {
     el.style.color = 'var(--orange)';
     el.style.display = 'inline';
     clearTimeout(notesSaveTimer);
-    notesSaveTimer = setTimeout(saveNotes, 1500);
+    notesSaveTimer = setTimeout(saveNotes, 3000);
   }
 });
 
