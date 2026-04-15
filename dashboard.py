@@ -25,8 +25,10 @@ PIPELINE_LOG     = str(Path(__file__).parent / "pipeline.log")
 OUTPUT_FILENAME  = "_zusammenfassung.md"
 SUMMARY_RE       = re.compile(r'^_zusammenfassung.*\.md$')
 NOTES_FILENAME      = "_notizen.md"
-FILE_NOTES_FILENAME = "_file_notes.json"
+FILE_NOTES_FILENAME  = "_file_notes.json"
+CUSTOM_INFO_FILENAME = "_custom_info.json"
 PROGRESS_FILE    = Path(__file__).parent / "progress.json"
+USER_STATE_FILE  = Path(__file__).parent / "user_state.json"
 SUPPORTED_EXT    = {".pdf", ".doc", ".docx", ".txt", ".md", ".pptx", ".ppt"}
 
 app = Flask(__name__)
@@ -42,6 +44,18 @@ def load_progress() -> dict:
 
 def save_progress(data: dict):
     PROGRESS_FILE.write_text(json.dumps(data, indent=2))
+
+# ---------------------------------------------------------------------------
+# User state store (favourites, read files, archived, hidden, pins, todos)
+# ---------------------------------------------------------------------------
+
+def load_user_state() -> dict:
+    if USER_STATE_FILE.exists():
+        return json.loads(USER_STATE_FILE.read_text())
+    return {}
+
+def save_user_state(data: dict):
+    USER_STATE_FILE.write_text(json.dumps(data, indent=2))
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -66,14 +80,16 @@ def _course_info(rel_path: str, d: Path, progress: dict) -> dict:
     files = list_files(d)
     summary_path = get_latest_summary(d) or (d / OUTPUT_FILENAME)
     notes_path   = d / NOTES_FILENAME
+    sync_path    = d / "_last_sync"
     p = progress.get(rel_path, progress.get(d.name, {}))
     summary_mtime = int(summary_path.stat().st_mtime) if summary_path.exists() else None
-    # Count files newer than the summary
+    sync_mtime    = int(sync_path.read_text().strip()) if sync_path.exists() else None
+    # Count files newer than the last sync
     new_files = 0
-    if summary_mtime:
+    if sync_mtime:
         for fname in files:
             fpath = d / fname
-            if fpath.exists() and int(fpath.stat().st_mtime) > summary_mtime:
+            if fpath.exists() and int(fpath.stat().st_mtime) > sync_mtime:
                 new_files += 1
     return {
         "name":        d.name,
@@ -83,6 +99,7 @@ def _course_info(rel_path: str, d: Path, progress: dict) -> dict:
         "file_count":  len(files),
         "new_files":   new_files,
         "summary_age": summary_mtime,
+        "sync_age":    sync_mtime,
         "progress":    {
             "total":        p.get("total", 0),
             "known":        p.get("known", 0),
@@ -149,6 +166,8 @@ def list_files(course_dir: Path) -> list[str]:
         and not SUMMARY_RE.match(f.name)
         and f.name != NOTES_FILENAME
         and f.name != FILE_NOTES_FILENAME
+        and f.name != CUSTOM_INFO_FILENAME
+        and f.name != "_last_sync"
         and ".summary" not in f.name
     ])
 
@@ -225,7 +244,10 @@ def get_pipeline_status() -> dict:
 
 @app.route("/api/courses")
 def api_courses():
-    return jsonify(get_courses())
+    data = get_courses()
+    # Inject global last-sync timestamp (courses.json mtime as fallback)
+    last_sync = int(COURSES_JSON.stat().st_mtime) if COURSES_JSON.exists() else None
+    return jsonify({"tree": data, "last_sync": last_sync})
 
 @app.route("/api/files/<path:course_name>")
 def api_files(course_name):
@@ -374,6 +396,18 @@ def api_streak():
     prog = load_progress()
     return jsonify(prog.get("_streak", {"count": 0, "last_date": None}))
 
+@app.route("/api/user-state", methods=["GET"])
+def api_user_state_get():
+    return jsonify(load_user_state())
+
+@app.route("/api/user-state", methods=["POST"])
+def api_user_state_post():
+    data = request.json or {}
+    state = load_user_state()
+    state.update(data)
+    save_user_state(state)
+    return jsonify({"ok": True})
+
 @app.route("/api/progress-reset/<path:course_name>", methods=["POST"])
 def api_progress_reset(course_name):
     prog = load_progress()
@@ -493,6 +527,22 @@ def api_course_info(course_name):
                 entry = val
                 break
     return jsonify(entry.get("meta", {}) if entry else {})
+
+@app.route("/api/custom-info/<path:course_name>")
+def api_get_custom_info(course_name):
+    path = COURSES_DIR / course_name / CUSTOM_INFO_FILENAME
+    if not path.exists():
+        return jsonify([])
+    return jsonify(json.loads(path.read_text(encoding="utf-8")))
+
+@app.route("/api/custom-info/<path:course_name>", methods=["POST"])
+def api_save_custom_info(course_name):
+    d = COURSES_DIR / course_name
+    if not d.is_dir():
+        return jsonify({"success": False})
+    fields = request.json  # list of {label, value}
+    (d / CUSTOM_INFO_FILENAME).write_text(json.dumps(fields, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"success": True})
 
 @app.route("/api/pipeline-status")
 def api_pipeline():
@@ -928,6 +978,15 @@ body {
   flex-shrink: 0; position: relative; z-index: 5; transition: background var(--transition);
 }
 .resize-divider:hover, .resize-divider.dragging { background: var(--blue); opacity: .6; }
+/* Subtle grip dots to aid discoverability */
+.resize-divider::after {
+  content: ''; position: absolute; top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  width: 3px; height: 28px; border-radius: 3px;
+  background: var(--border2); opacity: 0;
+  transition: opacity var(--transition);
+}
+.resize-divider:hover::after, .resize-divider.dragging::after { opacity: 1; }
 
 /* Collapsed sidebar */
 #sidebar.collapsed {
@@ -1016,7 +1075,7 @@ body {
 .panel-inner-flex { display: flex; flex-direction: column; height: 100%; }
 
 /* Home panel */
-.stats-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 24px; }
+.stats-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 20px; }
 .stat-card {
   background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
   padding: 16px 18px;
@@ -1039,6 +1098,157 @@ body {
   padding: 12px 18px; display: flex; align-items: center; gap: 12px; margin-bottom: 20px;
 }
 .pipeline-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+
+/* Sticky notes pinboard */
+.pinboard {
+  display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 24px;
+}
+.sticky {
+  width: 160px; min-height: 120px; border-radius: 3px; padding: 10px;
+  display: flex; flex-direction: column; gap: 6px; position: relative;
+  box-shadow: 2px 3px 8px rgba(0,0,0,.35);
+  transition: box-shadow var(--transition), transform var(--transition);
+  cursor: grab;
+}
+.sticky:active { cursor: grabbing; }
+.sticky textarea { cursor: text; }
+.sticky:hover { box-shadow: 3px 5px 14px rgba(0,0,0,.5); transform: translateY(-1px); }
+.sticky textarea {
+  flex: 1; background: transparent; border: none; outline: none;
+  font-size: 12.5px; line-height: 1.6; resize: none; color: #1a1a1a;
+  font-family: inherit; min-height: 80px;
+}
+.sticky textarea::placeholder { color: rgba(0,0,0,.35); }
+.sticky-del {
+  position: absolute; top: 5px; right: 6px;
+  background: none; border: none; cursor: pointer;
+  font-size: 12px; color: rgba(0,0,0,.3); padding: 0; line-height: 1;
+  transition: color .15s;
+}
+.sticky-del:hover { color: rgba(0,0,0,.7); }
+.pinboard-add {
+  width: 160px; min-height: 120px; border-radius: 3px;
+  border: 2px dashed var(--border2); display: flex; align-items: center;
+  justify-content: center; cursor: pointer; color: var(--text3); font-size: 22px;
+  transition: border-color var(--transition), color var(--transition);
+}
+.pinboard-add:hover { border-color: var(--text3); color: var(--text2); }
+
+/* To-do widget */
+.todo-widget {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  padding: 14px 18px; margin-bottom: 24px;
+}
+.todo-widget-header {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+}
+.todo-widget-title { font-size: 11px; font-weight: 600; color: var(--text3); letter-spacing: .04em; flex: 1; }
+.todo-clear-btn {
+  background: none; border: none; color: var(--text3); cursor: pointer;
+  font-size: 11px; padding: 2px 6px; border-radius: 4px;
+  transition: color var(--transition), background var(--transition);
+}
+.todo-clear-btn:hover { color: var(--text2); background: var(--bg3); }
+.todo-list { display: flex; flex-direction: column; gap: 1px; margin-bottom: 8px; }
+.todo-item {
+  display: flex; align-items: flex-start; gap: 8px; padding: 4px 2px;
+  border-radius: 5px; position: relative;
+}
+.todo-item.drag-over { outline: 2px dashed var(--blue); outline-offset: -1px; border-radius: 5px; }
+.todo-drag-handle {
+  color: var(--text3); font-size: 11px; cursor: grab; flex-shrink: 0; padding-top: 4px;
+  opacity: 0; transition: opacity .15s; user-select: none; line-height: 1;
+}
+.todo-item:hover .todo-drag-handle { opacity: 1; }
+.todo-drag-handle:active { cursor: grabbing; }
+.todo-cb {
+  appearance: none; -webkit-appearance: none;
+  width: 14px; height: 14px; border: 1.5px solid var(--text3);
+  border-radius: 3px; cursor: pointer; flex-shrink: 0; margin-top: 3px;
+  background: transparent; transition: background var(--transition), border-color var(--transition);
+}
+.todo-cb:checked {
+  background: var(--blue); border-color: var(--blue);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M1.5 5l2.5 2.5 4.5-4.5' stroke='white' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-size: 10px; background-repeat: no-repeat; background-position: center;
+}
+.todo-text {
+  flex: 1; background: none; border: none; outline: none;
+  color: var(--text2); font-size: 13px; line-height: 1.5;
+  font-family: inherit; resize: none; padding: 0; min-height: 20px;
+  transition: color var(--transition);
+}
+.todo-text.done { color: var(--text3); text-decoration: line-through; }
+.todo-text::placeholder { color: var(--text3); }
+.todo-del-btn {
+  background: none; border: none; color: transparent; cursor: pointer;
+  font-size: 12px; padding: 0 3px; border-radius: 3px; line-height: 1; flex-shrink: 0;
+  transition: color var(--transition);
+}
+.todo-item:hover .todo-del-btn { color: var(--text3); }
+.todo-del-btn:hover { color: var(--red) !important; }
+.todo-add-btn {
+  background: none; border: none; color: var(--text3); cursor: pointer;
+  font-size: 12px; padding: 3px 0; display: flex; align-items: center; gap: 5px;
+  transition: color var(--transition);
+}
+.todo-add-btn:hover { color: var(--text2); }
+.todo-link-btn {
+  background: none; border: 1px solid var(--border); color: var(--text3); cursor: pointer;
+  font-size: 11px; padding: 1px 5px; border-radius: 4px; flex-shrink: 0; line-height: 1.4;
+  transition: color var(--transition), border-color var(--transition);
+}
+.todo-link-btn:hover { color: var(--blue); border-color: var(--blue); }
+.todo-due {
+  font-size: 10px; padding: 1px 6px; border-radius: 10px; white-space: nowrap;
+  flex-shrink: 0; cursor: pointer; border: none; font-family: inherit; line-height: 1.6;
+  transition: opacity .15s;
+}
+.todo-due.overdue  { background: rgba(248,113,113,.18); color: var(--red); }
+.todo-due.today    { background: rgba(251,191,36,.18);  color: var(--yellow); }
+.todo-due.upcoming { background: rgba(91,142,240,.12);  color: var(--blue); }
+.todo-due:hover { opacity: .75; }
+.todo-sort-btn {
+  background: none; border: none; cursor: pointer; font-size: 11px; color: var(--text3);
+  padding: 1px 5px; border-radius: 4px; transition: color .15s;
+}
+.todo-sort-btn:hover { color: var(--text2); }
+.todo-sort-btn.active { color: var(--blue); }
+.todo-course-pill {
+  font-size: 10px; background: rgba(79,142,247,.15); color: var(--blue);
+  border-radius: 10px; padding: 2px 7px; white-space: nowrap; flex-shrink: 0;
+  cursor: pointer; transition: background var(--transition);
+}
+.todo-course-pill:hover { background: rgba(79,142,247,.3); }
+.todo-course-picker {
+  position: absolute; z-index: 200; background: var(--bg2); border: 1px solid var(--border2);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); min-width: 200px; max-width: 280px;
+  right: 0; top: 100%; margin-top: 4px;
+}
+.tcp-search-wrap { padding: 8px 10px 4px; }
+.tcp-search {
+  width: 100%; background: var(--bg3); border: 1px solid var(--border); border-radius: 5px;
+  color: var(--text2); font-size: 12px; padding: 4px 8px; outline: none; box-sizing: border-box;
+}
+.tcp-list { max-height: 200px; overflow-y: auto; padding: 4px 0 6px; }
+.tcp-item {
+  padding: 6px 12px; font-size: 12px; color: var(--text2); cursor: pointer;
+  transition: background var(--transition);
+}
+.tcp-item:hover, .tcp-item.tcp-active { background: var(--bg3); }
+/* Course-level todo widget */
+.course-todos-wrap {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  padding: 10px 14px; margin-bottom: 16px; display: none;
+}
+.course-todos-header {
+  font-size: 11px; font-weight: 600; color: var(--text3); letter-spacing: .04em; margin-bottom: 8px;
+  display: flex; align-items: center; gap: 8px;
+}
+.course-todos-header a {
+  font-size: 10px; color: var(--blue); cursor: pointer; margin-left: auto; text-decoration: none;
+}
+.course-todos-header a:hover { text-decoration: underline; }
 
 .recent-list { display: flex; flex-direction: column; gap: 2px; }
 .recent-item {
@@ -1164,6 +1374,24 @@ body {
   cursor: text; transform-origin: 0% 0%;
 }
 .textLayer ::selection { background: rgba(58,130,246,.35); color: transparent; }
+/* PDF find highlights */
+.pdf-hl     { background: rgba(255,213,0,.55) !important; border-radius: 2px; }
+.pdf-hl-cur { background: rgba(255,110,0,.75) !important; }
+/* PDF in-page find bar */
+#pdf-find-bar {
+  display: none; align-items: center; gap: 6px; flex-shrink: 0;
+  padding: 6px 12px; border-bottom: 1px solid var(--border);
+  background: var(--bg3);
+}
+#pdf-find-input {
+  flex: 1; max-width: 200px;
+  padding: 5px 10px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--bg2);
+  color: var(--text); font-size: 12px; outline: none;
+  transition: border-color var(--transition);
+}
+#pdf-find-input:focus { border-color: var(--blue); }
+#pdf-find-count { font-size: 11px; min-width: 54px; }
 
 /* Fake fullscreen — covers entire viewport, includes notes panel */
 #preview-area {
@@ -1345,6 +1573,34 @@ body {
   font-family: inherit;
 }
 #fnotes-editor::placeholder { color: var(--text3); }
+#fnotes-rendered {
+  flex: 1; overflow-y: auto; padding: 14px 14px;
+  display: none; font-size: 12.5px; line-height: 1.75; color: var(--text2);
+}
+#fnotes-rendered h1,#fnotes-rendered h2,#fnotes-rendered h3 {
+  color: var(--text1); margin: 12px 0 6px; font-size: 13px; font-weight: 600;
+}
+#fnotes-rendered h1 { font-size: 15px; }
+#fnotes-rendered p { margin: 4px 0 8px; }
+#fnotes-rendered ul,#fnotes-rendered ol { padding-left: 16px; margin: 4px 0 8px; }
+#fnotes-rendered li { margin: 3px 0; }
+#fnotes-rendered code { background: var(--bg3); padding: 1px 5px; border-radius: 3px; font-size: 11.5px; }
+#fnotes-rendered pre { background: var(--bg3); padding: 10px; border-radius: var(--radius); overflow-x: auto; margin: 8px 0; }
+#fnotes-rendered pre code { background: none; padding: 0; }
+/* Task list checkboxes */
+#fnotes-rendered ul { list-style: none; padding-left: 2px; }
+#fnotes-rendered li { display: flex; align-items: flex-start; gap: 7px; padding: 2px 0; }
+#fnotes-rendered li input.task-list-item-checkbox {
+  appearance: none; -webkit-appearance: none;
+  width: 14px; height: 14px; border: 1.5px solid var(--text3);
+  border-radius: 3px; cursor: pointer; flex-shrink: 0; margin-top: 4px;
+  background: transparent; transition: background var(--transition), border-color var(--transition);
+}
+#fnotes-rendered li input.task-list-item-checkbox:checked {
+  background: var(--blue); border-color: var(--blue);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Cpath d='M1.5 5l2.5 2.5 4.5-4.5' stroke='white' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-size: 10px; background-repeat: no-repeat; background-position: center;
+}
 
 /* Search results */
 .search-results-header { font-size: 12px; color: var(--text3); margin-bottom: 16px; }
@@ -1477,6 +1733,17 @@ body {
 .info-label { color: var(--text3); font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; padding-top: 2px; }
 .info-value { color: var(--text2); line-height: 1.5; }
 .info-desc { font-size: 13px; color: var(--text2); line-height: 1.65; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); white-space: pre-wrap; }
+.custom-info-row { display: grid; grid-template-columns: 140px 1fr auto; gap: 6px; align-items: start; margin-bottom: 6px; }
+.custom-info-row input, .custom-info-row textarea {
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 6px;
+  color: var(--text); font-size: 12px; padding: 5px 8px; font-family: inherit; outline: none;
+  transition: border-color .15s;
+}
+.custom-info-row input:focus, .custom-info-row textarea:focus { border-color: var(--blue); }
+.custom-info-row input { height: 30px; }
+.custom-info-row textarea { resize: vertical; min-height: 30px; line-height: 1.5; }
+.custom-info-del { background: none; border: none; cursor: pointer; color: var(--text3); font-size: 13px; padding: 4px; border-radius: 4px; transition: color .15s; margin-top: 2px; }
+.custom-info-del:hover { color: var(--red); }
 .chat-layout { display: flex; flex-direction: column; height: 100%; }
 .chat-messages {
   flex: 1; overflow-y: auto; padding: 28px 40px; display: flex; flex-direction: column; gap: 18px;
@@ -1545,6 +1812,50 @@ body {
 .rec-card-reason { font-size: 9px; color: var(--text3); text-transform: uppercase; letter-spacing: .08em; font-weight: 700; }
 .rec-card-name { font-size: 13px; color: var(--text); font-weight: 600; }
 .rec-card-meta { font-size: 11px; color: var(--text3); }
+
+/* Sync tile */
+#sync-tile {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--text3);
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 20px; padding: 3px 10px; margin-bottom: 18px;
+}
+#sync-tile .sync-dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex-shrink: 0;
+}
+
+/* Courses overview */
+.co-semester { margin-bottom: 32px; }
+.co-semester-title {
+  font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--text3); margin-bottom: 12px; padding-bottom: 6px;
+  border-bottom: 1px solid var(--border);
+}
+.co-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+.co-card {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px 14px 12px; cursor: pointer; position: relative; overflow: hidden;
+  transition: border-color .15s, transform .15s, box-shadow .15s;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.co-card:hover { border-color: var(--blue); transform: translateY(-2px); box-shadow: var(--shadow); }
+.co-card-accent { position: absolute; top: 0; left: 0; right: 0; height: 3px; border-radius: 10px 10px 0 0; }
+.co-card-name { font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.35; margin-top: 4px; }
+.co-card-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.co-badge {
+  font-size: 10px; padding: 1px 6px; border-radius: 20px; font-weight: 600;
+  background: var(--bg3); color: var(--text3);
+}
+.co-badge.green  { background: rgba(52,211,153,.15); color: var(--green); }
+.co-badge.blue   { background: rgba(91,142,240,.15); color: var(--blue); }
+.co-badge.yellow { background: rgba(251,191,36,.15);  color: var(--yellow); }
+.co-badge.purple { background: rgba(167,139,250,.15); color: var(--purple); }
+.co-card-bar { height: 3px; border-radius: 2px; background: var(--bg3); margin-top: 4px; overflow: hidden; }
+.co-card-bar-fill { height: 100%; border-radius: 2px; background: linear-gradient(90deg,var(--blue),var(--purple)); }
 
 /* Last-studied label in sidebar */
 .citem-last { font-size: 9px; color: var(--text3); margin-top: 1px; }
@@ -1635,13 +1946,15 @@ body {
 
 <!-- Topbar -->
 <div id="topbar">
-  <button id="sidebar-toggle" onclick="toggleSidebar()" title="Kursliste ein-/ausblenden (B)">☰</button>
-  <div id="topbar-logo"><span class="logo-icon">📚</span><span class="logo-wordmark"> <span>Stud.IP</span> Dashboard</span></div>
-  <input id="search-global" type="text" placeholder="🔍  Suche in allen Zusammenfassungen… (Ctrl+K)" oninput="handleGlobalSearch(event)">
-  <button class="tbtn btn-gray topbar-home" onclick="goHome()" title="Übersicht (Esc)"><span class="tbtn-label">Übersicht</span></button>
-  <button class="tbtn btn-gray topbar-shortcuts" onclick="showShortcuts()" title="Tastenkürzel anzeigen (?)">⌨️</button>
-  <button class="tbtn btn-gray" id="theme-toggle-btn" onclick="toggleTheme()" title="Hell/Dunkel wechseln">🌙</button>
-  <button class="tbtn btn-blue" id="scrape-btn" onclick="runScraper()">↓<span class="tbtn-label"> Neue Dateien</span></button>
+  <button id="sidebar-toggle" onclick="toggleSidebar()" title="Toggle course list (B)">☰</button>
+  <div id="topbar-logo" onclick="goHome()" style="cursor:pointer"><span class="logo-icon">📚</span><span class="logo-wordmark"> <span>Stud.IP</span> Dashboard</span></div>
+  <input id="search-global" type="text" placeholder="🔍  Search all summaries… (Ctrl+K)" oninput="handleGlobalSearch(event)">
+  <button class="tbtn btn-gray" id="pdf-find-topbar-btn" onclick="togglePdfFind()"
+    style="display:none;font-size:12px;padding:6px 10px" title="Search in PDF (Ctrl+F)">🔍 in PDF</button>
+  <button class="tbtn btn-gray" id="courses-overview-btn" onclick="goCoursesOverview()" title="Course overview">All courses</button>
+  <button class="tbtn btn-gray topbar-shortcuts" onclick="showShortcuts()" title="Keyboard shortcuts (?)">⌨️</button>
+  <button class="tbtn btn-gray" id="theme-toggle-btn" onclick="toggleTheme()" title="Toggle light/dark">🌙</button>
+  <button class="tbtn btn-blue" id="scrape-btn" onclick="runScraper()">↓<span class="tbtn-label"> Sync</span></button>
 </div>
 
 <!-- Mobile sidebar backdrop -->
@@ -1649,9 +1962,9 @@ body {
 
 <!-- Course context menu -->
 <div id="ctx-menu">
-  <div class="ctx-item" id="ctx-archive-btn" onclick="ctxArchive()">📦 Archivieren</div>
-  <div class="ctx-item" id="ctx-restore-btn" onclick="ctxRestore()" style="display:none">↩ Wiederherstellen</div>
-  <div class="ctx-item danger" id="ctx-remove-btn" onclick="ctxRemove()">✕ Entfernen</div>
+  <div class="ctx-item" id="ctx-archive-btn" onclick="ctxArchive()">📦 Archive</div>
+  <div class="ctx-item" id="ctx-restore-btn" onclick="ctxRestore()" style="display:none">↩ Restore</div>
+  <div class="ctx-item danger" id="ctx-remove-btn" onclick="ctxRemove()">✕ Remove</div>
 </div>
 
 <!-- Layout -->
@@ -1660,27 +1973,24 @@ body {
   <!-- Sidebar -->
   <div id="sidebar">
     <div id="sidebar-top">
-      <input id="sidebar-search" type="text" placeholder="Kurs suchen…" oninput="filterAndRenderSidebar()">
+      <input id="sidebar-search" type="text" placeholder="Search courses…" oninput="filterAndRenderSidebar()">
       <div class="filter-pills">
-        <button class="pill active" data-filter="all"       onclick="setFilter('all')">Alle</button>
-        <button class="pill"        data-filter="summary"   onclick="setFilter('summary')">✓ Zusammenfassung</button>
-        <button class="pill"        data-filter="nosummary" onclick="setFilter('nosummary')">✗ Offen</button>
-        <button class="pill"        data-filter="fav"       onclick="setFilter('fav')">⭐ Favoriten</button>
+        <button class="pill active" data-filter="all"       onclick="setFilter('all')">All</button>
+        <button class="pill"        data-filter="summary"   onclick="setFilter('summary')">✓ Summary</button>
+        <button class="pill"        data-filter="nosummary" onclick="setFilter('nosummary')">✗ Open</button>
+        <button class="pill"        data-filter="fav"       onclick="setFilter('fav')">⭐ Favourites</button>
       </div>
       <div class="sort-row">
-        <label>Sortieren:</label>
+        <label>Sort:</label>
         <select class="sort-select" onchange="setSortAndRender(this.value)">
           <option value="name">Name</option>
-          <option value="files">Dateien</option>
-          <option value="progress">Fortschritt</option>
-          <option value="recent">Zuletzt aktualisiert</option>
+          <option value="files">Files</option>
+          <option value="progress">Progress</option>
+          <option value="recent">Last updated</option>
         </select>
       </div>
     </div>
     <div id="course-list"></div>
-    <button id="global-learn-btn" onclick="startGlobalLearn()" title="Alle Lernkarten aus allen Kursen">
-      🧠 Alle Karten lernen
-    </button>
   </div>
 
   <!-- Sidebar / Main resize divider -->
@@ -1692,19 +2002,19 @@ body {
     <!-- Course title bar (hidden on home) -->
     <div id="course-title-bar" style="display:none">
       <span id="course-title-text"></span>
-      <button id="course-sync-btn" onclick="syncCourse()" title="Neue Ordner & Dateien von Stud.IP laden"
+      <button id="course-sync-btn" onclick="syncCourse()" title="Sync new folders & files from Stud.IP"
         style="background:none;border:1px solid var(--border);cursor:pointer;color:var(--text3);font-size:11px;padding:2px 8px;border-radius:5px;flex-shrink:0;margin-left:auto">↓ Sync</button>
-      <button onclick="goHome()" title="Zurück zur Übersicht (Esc)" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:12px;padding:2px 6px;border-radius:5px;flex-shrink:0">✕</button>
+      <button onclick="goHome()" title="Back to home (Esc)" style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:12px;padding:2px 6px;border-radius:5px;flex-shrink:0">✕</button>
     </div>
 
     <!-- Tabs (hidden on home) -->
     <div id="tabs" style="display:none">
-      <button class="tab active" data-tab="files"   onclick="switchTab('files')">📁 Dateien</button>
+      <button class="tab active" data-tab="files"   onclick="switchTab('files')">📁 Files</button>
       <button class="tab"        data-tab="info"    onclick="switchTab('info')">ℹ️ Info</button>
-      <button class="tab"        data-tab="summary" onclick="switchTab('summary')">📄 Zusammenfassung</button>
-      <button class="tab"        data-tab="learn"   onclick="switchTab('learn')">🧠 Lernen</button>
-      <button class="tab"        data-tab="notes"   onclick="switchTab('notes')">✏️ Notizen</button>
-      <button class="tab"        data-tab="chat"    onclick="switchTab('chat')">💬 Fragen</button>
+      <button class="tab"        data-tab="summary" onclick="switchTab('summary')">📄 Summary</button>
+      <button class="tab"        data-tab="learn"   onclick="switchTab('learn')">🧠 Learn</button>
+      <button class="tab"        data-tab="notes"   onclick="switchTab('notes')">✏️ Notes</button>
+      <button class="tab"        data-tab="chat"    onclick="switchTab('chat')">💬 Chat</button>
       <div class="tab-spacer"></div>
       <span id="tab-spinner" style="display:none" class="spin"></span>
     </div>
@@ -1714,11 +2024,27 @@ body {
 
       <!-- Home -->
       <div class="panel active" id="panel-home">
-        <div class="stats-grid" id="stats-grid"></div>
-        <div id="pipeline-card-wrap"></div>
         <div id="recommendations-wrap"></div>
-        <div class="section-title">Zuletzt aktualisiert</div>
-        <div class="recent-list" id="recent-list"></div>
+        <div id="sync-tile"></div>
+        <!-- Sticky notes pinboard -->
+        <div class="section-title" style="margin-bottom:12px">Pinboard</div>
+        <div class="pinboard" id="pinboard"></div>
+        <!-- To-do widget -->
+        <div class="todo-widget">
+          <div class="todo-widget-header">
+            <span class="todo-widget-title">TO DO</span>
+            <button class="todo-sort-btn" id="todo-sort-btn" onclick="todoToggleSort()" title="Sort by due date">📅 Sort</button>
+            <button class="todo-clear-btn" id="todo-hide-done-btn" onclick="todoToggleHideDone()" title="Hide/show completed">Hide done</button>
+            <button class="todo-clear-btn" onclick="todoClearDone()" title="Remove completed">Remove completed</button>
+          </div>
+          <div class="todo-list" id="todo-list"></div>
+          <button class="todo-add-btn" onclick="todoAddItem()">+ Add task</button>
+        </div>
+      </div>
+
+      <!-- Courses overview -->
+      <div class="panel" id="panel-courses">
+        <div id="courses-overview-body"></div>
       </div>
 
       <!-- Info -->
@@ -1726,44 +2052,68 @@ body {
         <div id="info-body" style="max-width:680px">
           <div class="empty-state">
             <div class="icon">ℹ️</div>
-            <h3>Kursinfo wird geladen…</h3>
+            <h3>Loading course info…</h3>
           </div>
         </div>
       </div>
 
       <!-- Files -->
       <div class="panel" id="panel-files">
+        <!-- Course-linked todos -->
+        <div class="course-todos-wrap" id="course-todos-wrap">
+          <div class="course-todos-header">
+            TO DO
+            <a onclick="goHome()">+ Add on home</a>
+          </div>
+          <div id="course-todos-list"></div>
+        </div>
         <div class="files-layout" id="files-layout">
           <div class="files-list-col" id="files-list-col">
-            <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;">
-              <span style="font-size:12px;font-weight:600;color:var(--text3);flex:1">DATEIEN</span>
-              <button id="filelist-toggle-btn" onclick="toggleFileList()" title="Dateiliste ein-/ausblenden">◀</button>
+            <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+              <span style="font-size:12px;font-weight:600;color:var(--text3);flex:1">FILES</span>
+              <button id="filelist-toggle-btn" onclick="toggleFileList()" title="Toggle file list">◀</button>
               <select id="file-sort-select" class="sort-select" style="font-size:10px;padding:2px 4px;max-width:90px" onchange="setFileSort(this.value)">
                 <option value="name">Name</option>
                 <option value="date">Datum</option>
               </select>
-              <button id="selection-toggle-btn" style="font-size:11px;color:var(--text3);background:none;border:1px solid var(--border);border-radius:5px;padding:2px 8px;cursor:pointer;transition:all .15s" onclick="toggleSelectionMode()">Auswählen</button>
+              <button id="selection-toggle-btn" style="font-size:11px;color:var(--text3);background:none;border:1px solid var(--border);border-radius:5px;padding:2px 8px;cursor:pointer;transition:all .15s" onclick="toggleSelectionMode()">Select</button>
+            </div>
+            <div style="margin-bottom:8px;position:relative">
+              <input id="file-search" type="text" placeholder="🔍 Filter files…"
+                oninput="filterFileList(this.value)"
+                style="width:100%;box-sizing:border-box;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;padding:5px 28px 5px 8px;outline:none;transition:border-color .15s"
+                onfocus="this.style.borderColor='var(--blue)'" onblur="this.style.borderColor='var(--border)'">
+              <button id="file-search-clear" onclick="clearFileSearch()" title="Clear"
+                style="display:none;position:absolute;right:6px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:var(--text3);font-size:13px;padding:0;line-height:1">✕</button>
             </div>
             <div id="file-list"></div>
             <div class="file-actions">
               <div id="selection-toolbar">
-                <span id="sel-count">0 ausgewählt</span>
+                <span id="sel-count">0 selected</span>
                 <div class="sel-toolbar-btns">
-                  <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markSelectedFilesRead(true)">✓ Gelesen</button>
-                  <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markSelectedFilesRead(false)">↺ Ungelesen</button>
+                  <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markSelectedFilesRead(true)">✓ Read</button>
+                  <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markSelectedFilesRead(false)">↺ Unread</button>
                 </div>
-                <button class="tbtn btn-blue" id="sel-summarize-btn" style="width:100%;font-size:11px" onclick="generateSummary(false)">Ausgewählte zusammenfassen</button>
+                <button class="tbtn btn-blue" id="sel-summarize-btn" style="width:100%;font-size:11px" onclick="generateSummary(false)">Summarize selected</button>
               </div>
               <div id="bulk-read-row" style="display:flex;gap:6px;margin-bottom:4px">
-                <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markAllFilesRead(true)">✓ Alle gelesen</button>
-                <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markAllFilesRead(false)">↺ Alle ungelesen</button>
+                <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markAllFilesRead(true)">✓ All read</button>
+                <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markAllFilesRead(false)">↺ All unread</button>
               </div>
-              <div class="limit-row">
-                Max. Dateien: <input class="limit-input" id="limit-input" type="number" value="3" min="1" max="50">
+              <button onclick="var o=this.classList.toggle('open');this.nextElementSibling.style.display=o?'block':'none';this.querySelector('.tog-arrow').textContent=o?'▾':'▶'"
+                style="width:100%;text-align:left;background:none;border:1px solid var(--border);border-radius:6px;padding:4px 8px;cursor:pointer;color:var(--text3);font-size:11px;margin-top:2px;transition:color .15s,border-color .15s"
+                onmouseover="this.style.color='var(--text)';this.style.borderColor='var(--blue)'"
+                onmouseout="this.style.color='var(--text3)';this.style.borderColor='var(--border)'">
+                <span class="tog-arrow">▶</span> Zusammenfassung erstellen
+              </button>
+              <div style="display:none;padding-top:4px">
+                <div class="limit-row">
+                  Max. files: <input class="limit-input" id="limit-input" type="number" value="3" min="1" max="50">
+                </div>
+                <button class="tbtn btn-blue"  style="width:100%" onclick="generateSummary(false)">Summarize</button>
+                <button class="tbtn btn-gray"  style="width:100%" onclick="generateSummary(false, true)">➕ Create another</button>
+                <button class="tbtn btn-gray"  style="width:100%;opacity:.7" onclick="generateSummary(true)">↺ Overwrite</button>
               </div>
-              <button class="tbtn btn-blue"  style="width:100%" onclick="generateSummary(false)">Zusammenfassen</button>
-              <button class="tbtn btn-gray"  style="width:100%" onclick="generateSummary(false, true)">➕ Weitere erstellen</button>
-              <button class="tbtn btn-gray"  style="width:100%;opacity:.7" onclick="generateSummary(true)">↺ Überschreiben</button>
             </div>
           </div>
           <!-- Files / Preview resize divider -->
@@ -1773,28 +2123,43 @@ body {
             <div class="files-preview-col" id="files-preview-col">
               <div class="preview-box">
                 <div class="preview-header" id="preview-header">
-                  <button id="filelist-show-btn" onclick="toggleFileList()" title="Dateiliste einblenden"
+                  <button id="filelist-show-btn" onclick="toggleFileList()" title="Show file list"
                     style="display:none;background:none;border:none;cursor:pointer;color:var(--text3);font-size:13px;padding:2px 6px;border-radius:4px;margin-right:4px;transition:color var(--transition),background var(--transition)"
-                    onmouseover="this.style.background='var(--bg4)'" onmouseout="this.style.background='none'">▶ Liste</button>
-                  <span class="preview-header-name">Datei auswählen zum Anzeigen</span>
+                    onmouseover="this.style.background='var(--bg4)'" onmouseout="this.style.background='none'">▶ List</button>
+                  <span class="preview-header-name">Select a file to preview</span>
+                </div>
+                <div id="pdf-find-bar">
+                  <input id="pdf-find-input" type="text" placeholder="Search in PDF…"
+                    oninput="pdfFindRun(this.value)"
+                    onkeydown="if(event.key==='Enter'){event.shiftKey?pdfFindPrev():pdfFindNext()}else if(event.key==='Escape'){pdfFindClose()}">
+                  <span id="pdf-find-count"></span>
+                  <button class="zoom-btn" onclick="pdfFindPrev()" title="Previous (Shift+Enter)">↑</button>
+                  <button class="zoom-btn" onclick="pdfFindNext()" title="Next (Enter)">↓</button>
+                  <button onclick="pdfFindClose()" title="Close"
+                    style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:14px;padding:2px 6px;border-radius:4px;margin-left:auto;transition:background var(--transition)"
+                    onmouseover="this.style.background='var(--bg4)'" onmouseout="this.style.background='none'">✕</button>
                 </div>
                 <div class="preview-body" id="preview-body">
                   <div class="preview-placeholder">
                     <div class="icon">👆</div>
-                    <div>Datei anklicken</div>
+                    <div>Click a file</div>
                   </div>
                 </div>
               </div>
             </div>
+            <!-- Resize handle between preview and notes panel -->
+            <div class="resize-divider" id="divider-notes" style="display:none" title="Ziehen zum Anpassen"></div>
             <!-- File notes panel (slides in from right) -->
             <div class="files-notes-col" id="files-notes-col">
               <div class="fnotes-header">
-                <span class="fnotes-title" id="fnotes-title">Notizen</span>
+                <span class="fnotes-title" id="fnotes-title">Notes</span>
                 <span id="fnotes-saved"></span>
-                <button class="fnotes-dl-btn" title="Als Markdown herunterladen" onclick="downloadFileNote()">⬇</button>
-                <button class="fnotes-dl-btn" title="Schließen" onclick="toggleFileNotes()">✕</button>
+                <button class="fnotes-dl-btn" id="fnotes-mode-btn" title="Preview" onclick="toggleFnotesMode()">👁</button>
+                <button class="fnotes-dl-btn" title="Download as Markdown" onclick="downloadFileNote()">⬇</button>
+                <button class="fnotes-dl-btn" title="Close" onclick="toggleFileNotes()">✕</button>
               </div>
-              <textarea id="fnotes-editor" placeholder="Notizen zu dieser Datei… (Markdown)"></textarea>
+              <textarea id="fnotes-editor" placeholder="Notes for this file… (Markdown)"></textarea>
+              <div id="fnotes-rendered"></div>
             </div>
           </div>
         </div>
@@ -1805,8 +2170,8 @@ body {
         <div id="summary-body">
           <div class="empty-state">
             <div class="icon">📄</div>
-            <h3>Keine Zusammenfassung</h3>
-            <p>Gehe zu "Dateien" und klicke "Zusammenfassen"</p>
+            <h3>No summary yet</h3>
+            <p>Go to "Files" and click "Summarize"</p>
           </div>
         </div>
       </div>
@@ -1816,8 +2181,8 @@ body {
         <div id="learn-body">
           <div class="empty-state">
             <div class="icon">🧠</div>
-            <h3>Keine Lernkarten</h3>
-            <p>Erstelle zuerst eine Zusammenfassung</p>
+            <h3>No flashcards</h3>
+            <p>Create a summary first</p>
           </div>
         </div>
       </div>
@@ -1826,12 +2191,12 @@ body {
       <div class="panel" id="panel-notes">
         <div class="notes-panel">
           <div class="notes-toolbar">
-            <span style="font-size:13px;font-weight:600;color:var(--text2);">Notizen</span>
+            <span style="font-size:13px;font-weight:600;color:var(--text2);">Notes</span>
             <div style="flex:1"></div>
             <span id="notes-saved"></span>
-            <button class="tbtn btn-gray" id="notes-preview-btn" onclick="toggleNotesPreview()">Vorschau</button>
+            <button class="tbtn btn-gray" id="notes-preview-btn" onclick="toggleNotesPreview()">Preview</button>
           </div>
-          <textarea id="notes-editor" placeholder="Eigene Notizen, Fragen, Zusammenhänge… (Markdown wird unterstützt)"></textarea>
+          <textarea id="notes-editor" placeholder="Your notes, questions, connections… (Markdown supported)"></textarea>
           <div id="notes-preview" class="md-content"></div>
         </div>
       </div>
@@ -1841,8 +2206,8 @@ body {
         <div id="chat-body">
           <div class="empty-state">
             <div class="icon">💬</div>
-            <h3>Fragen stellen</h3>
-            <p>Lade einen Kurs und stelle Fragen zur Zusammenfassung</p>
+            <h3>Ask questions</h3>
+            <p>Load a course and ask questions about the summary</p>
           </div>
         </div>
       </div>
@@ -1871,26 +2236,26 @@ body {
 <!-- Keyboard shortcuts overlay -->
 <div id="shortcuts-overlay" onclick="hideShortcuts()">
   <div class="shortcuts-box" onclick="event.stopPropagation()">
-    <h3>⌨️ Tastenkürzel</h3>
+    <h3>⌨️ Keyboard shortcuts</h3>
     <div class="shortcuts-section">Global</div>
-    <div class="shortcut-row"><kbd>?</kbd>          <span class="shortcut-desc">Tastenkürzel anzeigen</span></div>
-    <div class="shortcut-row"><kbd>⌘K</kbd>         <span class="shortcut-desc">Command Palette öffnen</span></div>
-    <div class="shortcut-row"><kbd>Esc</kbd>        <span class="shortcut-desc">Zur Übersicht / Overlay schließen</span></div>
-    <div class="shortcuts-section">Lernkarten</div>
-    <div class="shortcut-row"><kbd>Space</kbd>      <span class="shortcut-desc">Antwort anzeigen</span></div>
-    <div class="shortcut-row"><kbd>→ / k</kbd>      <span class="shortcut-desc">Gewusst</span></div>
-    <div class="shortcut-row"><kbd>← / u</kbd>      <span class="shortcut-desc">Nicht gewusst</span></div>
-    <div class="shortcuts-section">Dateien</div>
-    <div class="shortcut-row"><kbd>R</kbd>          <span class="shortcut-desc">Als gelesen markieren (toggle)</span></div>
+    <div class="shortcut-row"><kbd>?</kbd>          <span class="shortcut-desc">Show shortcuts</span></div>
+    <div class="shortcut-row"><kbd>⌘K</kbd>         <span class="shortcut-desc">Open command palette</span></div>
+    <div class="shortcut-row"><kbd>Esc</kbd>        <span class="shortcut-desc">Go home / close overlay</span></div>
+    <div class="shortcuts-section">Flashcards</div>
+    <div class="shortcut-row"><kbd>Space</kbd>      <span class="shortcut-desc">Reveal answer</span></div>
+    <div class="shortcut-row"><kbd>→ / k</kbd>      <span class="shortcut-desc">Known</span></div>
+    <div class="shortcut-row"><kbd>← / u</kbd>      <span class="shortcut-desc">Unknown</span></div>
+    <div class="shortcuts-section">Files</div>
+    <div class="shortcut-row"><kbd>R</kbd>          <span class="shortcut-desc">Toggle read</span></div>
     <div class="shortcuts-section">Navigation</div>
-    <div class="shortcut-row"><kbd>1</kbd>          <span class="shortcut-desc">Tab Dateien</span></div>
-    <div class="shortcut-row"><kbd>2</kbd>          <span class="shortcut-desc">Tab Zusammenfassung</span></div>
-    <div class="shortcut-row"><kbd>3</kbd>          <span class="shortcut-desc">Tab Lernen</span></div>
-    <div class="shortcut-row"><kbd>4</kbd>          <span class="shortcut-desc">Tab Notizen</span></div>
-    <div class="shortcut-row"><kbd>N</kbd>          <span class="shortcut-desc">Datei-Notizen ein/aus</span></div>
-    <div class="shortcut-row"><kbd>5</kbd>          <span class="shortcut-desc">Tab Fragen (AI Chat)</span></div>
+    <div class="shortcut-row"><kbd>1</kbd>          <span class="shortcut-desc">Files tab</span></div>
+    <div class="shortcut-row"><kbd>2</kbd>          <span class="shortcut-desc">Summary tab</span></div>
+    <div class="shortcut-row"><kbd>3</kbd>          <span class="shortcut-desc">Learn tab</span></div>
+    <div class="shortcut-row"><kbd>4</kbd>          <span class="shortcut-desc">Notes tab</span></div>
+    <div class="shortcut-row"><kbd>N</kbd>          <span class="shortcut-desc">Toggle file notes</span></div>
+    <div class="shortcut-row"><kbd>5</kbd>          <span class="shortcut-desc">Chat tab</span></div>
     <div style="margin-top:20px;text-align:right">
-      <button class="tbtn btn-gray" onclick="hideShortcuts()">Schließen</button>
+      <button class="tbtn btn-gray" onclick="hideShortcuts()">Close</button>
     </div>
   </div>
 </div>
@@ -1898,11 +2263,11 @@ body {
 <!-- Confirm modal -->
 <div id="confirm-overlay" onclick="hideConfirm()">
   <div class="confirm-box" onclick="event.stopPropagation()">
-    <h3 id="confirm-title">Sicher?</h3>
-    <p id="confirm-message">Diese Aktion kann nicht rückgängig gemacht werden.</p>
+    <h3 id="confirm-title">Are you sure?</h3>
+    <p id="confirm-message">This action cannot be undone.</p>
     <div class="confirm-btns">
-      <button class="tbtn btn-gray" onclick="hideConfirm()">Abbrechen</button>
-      <button class="tbtn btn-red" id="confirm-ok">Bestätigen</button>
+      <button class="tbtn btn-gray" onclick="hideConfirm()">Cancel</button>
+      <button class="tbtn btn-red" id="confirm-ok">Confirm</button>
     </div>
   </div>
 </div>
@@ -1910,15 +2275,15 @@ body {
 <!-- Command Palette -->
 <div id="cmd-overlay" onclick="closeCmdPalette()">
   <div id="cmd-box" onclick="event.stopPropagation()">
-    <input id="cmd-input" type="text" placeholder="Kurs oder Aktion suchen…"
+    <input id="cmd-input" type="text" placeholder="Search courses or actions…"
       oninput="renderPaletteResults(this.value)"
       onkeydown="handlePaletteKey(event)"
       autocomplete="off" spellcheck="false">
     <div id="cmd-results"></div>
     <div id="cmd-footer">
       <span class="cmd-hint"><kbd>↑↓</kbd> navigieren</span>
-      <span class="cmd-hint"><kbd>↵</kbd> öffnen</span>
-      <span class="cmd-hint"><kbd>Esc</kbd> schließen</span>
+      <span class="cmd-hint"><kbd>↵</kbd> open</span>
+      <span class="cmd-hint"><kbd>Esc</kbd> close</span>
     </div>
   </div>
 </div>
@@ -1957,12 +2322,81 @@ function toggleTheme() {
 // Apply saved theme immediately (before boot) to avoid flash
 applyTheme(localStorage.getItem('theme') === 'light');
 
-// ── Read-state helpers ───────────────────────────────────────────────────
-function _readKey(course) { return 'read_files__' + course; }
-function getReadSet(course) {
-  try { return new Set(JSON.parse(localStorage.getItem(_readKey(course)) || '[]')); } catch { return new Set(); }
+// ═══════════════════════════════════════════════════════════════════════════
+// User state — persisted server-side so it survives browser/device changes
+// ═══════════════════════════════════════════════════════════════════════════
+let _usFavs       = [];   // fav_courses
+let _usArchived   = [];   // archived_courses
+let _usHidden     = [];   // hidden_courses
+let _usReadFiles  = {};   // { course_path: [filename, ...] }
+let _usPins       = [];   // pins
+let _usTodos      = [];   // todos
+let _usTodoHideDone = false;
+
+let _usPersistTimer = null;
+function _persistUserState() {
+  clearTimeout(_usPersistTimer);
+  _usPersistTimer = setTimeout(() => {
+    fetch('/api/user-state', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        fav_courses:    _usFavs,
+        archived_courses: _usArchived,
+        hidden_courses: _usHidden,
+        read_files:     _usReadFiles,
+        pins:           _usPins,
+        todos:          _usTodos,
+        todo_hide_done: _usTodoHideDone,
+      })
+    });
+  }, 300);
 }
-function saveReadSet(course, set) { localStorage.setItem(_readKey(course), JSON.stringify([...set])); }
+
+async function _loadUserState() {
+  try {
+    const s = await fetch('/api/user-state').then(r => r.json());
+    // One-time migration from localStorage if server has no data yet
+    const migrateList = (key, fallback) => {
+      if (s[key] !== undefined) return s[key];
+      try { return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback)); } catch { return fallback; }
+    };
+    _usFavs         = migrateList('fav_courses', []);
+    _usArchived     = migrateList('archived_courses', []);
+    _usHidden       = migrateList('hidden_courses', []);
+    _usTodos        = migrateList('todos', []);
+    _usPins         = migrateList('pins', []);
+    _usTodoHideDone = s.todo_hide_done !== undefined
+      ? s.todo_hide_done
+      : (localStorage.getItem('todo_hide_done') === '1');
+    // Read files: merge all read_files__<course> keys from localStorage
+    if (s.read_files !== undefined) {
+      _usReadFiles = s.read_files;
+    } else {
+      _usReadFiles = {};
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith('read_files__')) {
+          const course = k.slice('read_files__'.length);
+          try { _usReadFiles[course] = JSON.parse(localStorage.getItem(k) || '[]'); } catch {}
+        }
+      }
+    }
+    // Persist migrated data back to server
+    _persistUserState();
+  } catch (e) {
+    console.warn('Could not load user state from server:', e);
+  }
+}
+
+// ── Read-state helpers ───────────────────────────────────────────────────
+function getReadSet(course) {
+  return new Set(_usReadFiles[course] || []);
+}
+function saveReadSet(course, set) {
+  _usReadFiles[course] = [...set];
+  _persistUserState();
+}
 function isFileRead(course, filename) { return getReadSet(course).has(filename); }
 function setFileRead(course, filename, read) {
   const s = getReadSet(course);
@@ -1976,32 +2410,25 @@ function setFileRead(course, filename, read) {
   });
   // Update preview header button
   const btn = document.getElementById('read-toggle-btn');
-  if (btn) { btn.textContent = read ? '✓ Gelesen' : 'Als gelesen markieren'; btn.classList.toggle('is-read', read); }
+  if (btn) { btn.textContent = read ? '✓ Read' : 'Mark as read'; btn.classList.toggle('is-read', read); }
 }
 
-function getFavorites() {
-  try { return JSON.parse(localStorage.getItem('fav_courses') || '[]'); } catch { return []; }
-}
-function setFavorites(arr) { localStorage.setItem('fav_courses', JSON.stringify(arr)); }
-function isFavorite(name) { return getFavorites().includes(name); }
+function getFavorites() { return _usFavs; }
+function setFavorites(arr) { _usFavs = arr; _persistUserState(); }
+function isFavorite(name) { return _usFavs.includes(name); }
 function toggleFavorite(name) {
-  let favs = getFavorites();
-  favs = favs.includes(name) ? favs.filter(f => f !== name) : [...favs, name];
-  setFavorites(favs);
+  _usFavs = _usFavs.includes(name) ? _usFavs.filter(f => f !== name) : [..._usFavs, name];
+  _persistUserState();
 }
 
 // ───────────────────────── Archive ─────────────────────────
-function getArchived() {
-  try { return JSON.parse(localStorage.getItem('archived_courses') || '[]'); } catch { return []; }
-}
-function setArchived(arr) { localStorage.setItem('archived_courses', JSON.stringify(arr)); }
-function isArchived(path) { return getArchived().includes(path); }
+function getArchived() { return _usArchived; }
+function setArchived(arr) { _usArchived = arr; _persistUserState(); }
+function isArchived(path) { return _usArchived.includes(path); }
 
 // ───────────────────────── Hidden (removed) ─────────────────────────
-function getHidden() {
-  try { return JSON.parse(localStorage.getItem('hidden_courses') || '[]'); } catch { return []; }
-}
-function setHidden(arr) { localStorage.setItem('hidden_courses', JSON.stringify(arr)); }
+function getHidden() { return _usHidden; }
+function setHidden(arr) { _usHidden = arr; _persistUserState(); }
 
 // ───────────────────────── Context menu ─────────────────────────
 let _ctxPath = null;
@@ -2049,7 +2476,7 @@ function ctxRestore() {
 }
 function ctxRemove() {
   if (!_ctxPath) return;
-  if (!confirm(`Kurs "${_ctxPath}" dauerhaft aus der Sidebar entfernen?`)) return;
+  if (!confirm(`Permanently remove "${_ctxPath}" from the sidebar?`)) return;
   const h = getHidden();
   if (!h.includes(_ctxPath)) h.push(_ctxPath);
   setHidden(h);
@@ -2066,6 +2493,15 @@ function ctxRemove() {
 // courseTree = raw API response (may include groups)
 // allCourses = flat list of all individual courses (for stats/home)
 let courseTree = [];
+let _lastSyncGlobal = null;
+
+async function _fetchCourses() {
+  const res = await fetch('/api/courses').then(r => r.json());
+  // support both old array shape and new {tree, last_sync} shape
+  if (Array.isArray(res)) { _lastSyncGlobal = null; return res; }
+  _lastSyncGlobal = res.last_sync || null;
+  return res.tree || [];
+}
 
 function flattenTree(tree) {
   const flat = [];
@@ -2077,17 +2513,31 @@ function flattenTree(tree) {
 }
 
 async function boot() {
-  const [tree, pipeline, streak] = await Promise.all([
-    fetch('/api/courses').then(r => r.json()),
-    fetch('/api/pipeline-status').then(r => r.json()),
-    fetch('/api/streak').then(r => r.json()),
-  ]);
-  courseTree = tree;
-  allCourses = flattenTree(tree);
+  await _loadUserState();
+  courseTree = await _fetchCourses();
+  allCourses = flattenTree(courseTree);
   filterAndRenderSidebar();
-  renderHome(allCourses, pipeline, streak);
+  renderHome(allCourses);
   initResizeDividers();
   applyFontSize();
+
+  // Init pinboard & to-do list
+  pinRender();
+  if (_todoLoad().length === 0) _todoSave([{ text: '', done: false }]);
+  todoRender();
+
+  // Restore last session state
+  const lastCourse = localStorage.getItem('last_course');
+  const lastTab    = localStorage.getItem('last_tab') || 'files';
+  if (lastCourse && allCourses.find(c => c.path === lastCourse)) {
+    activeCourse = lastCourse;
+    filterAndRenderSidebar();
+    document.getElementById('tabs').style.display = 'flex';
+    document.getElementById('course-title-bar').style.display = 'flex';
+    document.getElementById('course-title-text').textContent = lastCourse.split('/').pop();
+    switchTab(lastTab);
+    if (lastTab === 'files') loadFiles();
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2180,20 +2630,20 @@ function renderSidebar(tree) {
          style="${indent ? 'padding-left:22px' : ''}">
       <div class="citem-dot ${c.has_summary ? 'dot-ok' : 'dot-missing'}"></div>
       <div class="citem-body">
-        <div class="citem-name" title="${esc(c.name)}">${esc(c.name)}${c.new_files ? `<span class="new-badge">+${c.new_files}</span>` : ''}${allRead ? `<span style="color:var(--green);font-size:10px;margin-left:4px" title="Alle Dateien gelesen">✓</span>` : ''}</div>
+        <div class="citem-name" title="${esc(c.name)}">${esc(c.name)}${c.new_files ? `<span class="new-badge">+${c.new_files}</span>` : ''}${allRead ? `<span style="color:var(--green);font-size:10px;margin-left:4px" title="All files read">✓</span>` : ''}</div>
         <div class="citem-meta">
-          <span>${c.file_count} Datei${c.file_count !== 1 ? 'en' : ''}</span>
-          ${readCount > 0 && !allRead ? `<span style="color:var(--text3)">${readCount}/${c.file_count} gel.</span>` : ''}
-          ${c.new_files && sidebarSort === 'recent' ? `<span style="color:var(--blue);font-weight:600">+${c.new_files} neu</span>` : ''}
+          <span>${c.file_count} file${c.file_count !== 1 ? 's' : ''}</span>
+          ${readCount > 0 && !allRead ? `<span style="color:var(--text3)">${readCount}/${c.file_count} read</span>` : ''}
+          ${c.new_files && sidebarSort === 'recent' ? `<span style="color:var(--blue);font-weight:600">+${c.new_files} new</span>` : ''}
           ${c.has_summary ? `<span style="color:var(--green)">✓</span>` : ''}
           ${c.has_notes   ? `<span style="color:var(--purple)">📝</span>` : ''}
-          ${lastStudied   ? `<span title="Zuletzt gelernt">🕐 ${lastStudied}</span>` : ''}
+          ${lastStudied   ? `<span title="Last studied">🕐 ${lastStudied}</span>` : ''}
         </div>
         ${c.progress.total ? `<div class="progress-mini"><div class="progress-mini-fill" style="width:${pct}%"></div></div>` : ''}
       </div>
       ${inArchive
-        ? `<button class="fav-btn" title="Wiederherstellen" onclick="event.stopPropagation(); setArchived(getArchived().filter(p=>p!=='${esc(c.path)}')); filterAndRenderSidebar()">↩</button>`
-        : `<button class="fav-btn ${fav ? 'is-fav' : ''}" title="${fav ? 'Favorit entfernen' : 'Als Favorit markieren'}" onclick="event.stopPropagation(); handleFavClick('${esc(c.path)}')">⭐</button>`
+        ? `<button class="fav-btn" title="Restore" onclick="event.stopPropagation(); setArchived(getArchived().filter(p=>p!=='${esc(c.path)}')); filterAndRenderSidebar()">↩</button>`
+        : `<button class="fav-btn ${fav ? 'is-fav' : ''}" title="${fav ? 'Remove favourite' : 'Mark as favourite'}" onclick="event.stopPropagation(); handleFavClick('${esc(c.path)}')">⭐</button>`
       }
     </div>`;
   }
@@ -2221,13 +2671,13 @@ function renderSidebar(tree) {
   if (favCourses.length) {
     html += `<div class="sidebar-section-label">⭐ Favoriten</div>`;
     html += favCourses.map(c => courseHTML(c)).join('');
-    html += `<div class="sidebar-section-label" style="margin-top:6px">Kurse</div>`;
+    html += `<div class="sidebar-section-label" style="margin-top:6px">Courses</div>`;
   } else {
-    html += `<div class="sidebar-section-label">Kurse</div>`;
+    html += `<div class="sidebar-section-label">Courses</div>`;
   }
 
   if (!tree.length) {
-    html += `<div style="color:var(--text3);font-size:12px;padding:16px 12px">Keine Kurse gefunden</div>`;
+    html += `<div style="color:var(--text3);font-size:12px;padding:16px 12px">No courses found</div>`;
   } else {
     for (const item of tree) {
       html += item.is_group ? groupHTML(item) : courseHTML(item);
@@ -2259,74 +2709,382 @@ function handleFavClick(path) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Sticky notes pinboard
+// ═══════════════════════════════════════════════════════════════════════════
+const PIN_COLORS = ['#fef08a','#bbf7d0','#bfdbfe','#fecaca','#f5d0fe','#fed7aa'];
+
+function _pinLoad() { return _usPins; }
+function _pinSave(pins) { _usPins = pins; _persistUserState(); }
+
+let _pinDragIdx = null;
+
+function pinRender() {
+  const pins = _pinLoad();
+  const board = document.getElementById('pinboard');
+  if (!board) return;
+  board.innerHTML = '';
+  pins.forEach((p, i) => {
+    const div = document.createElement('div');
+    div.className = 'sticky';
+    div.style.background = p.color || PIN_COLORS[0];
+    div.draggable = true;
+    div.dataset.idx = i;
+    div.innerHTML = `<button class="sticky-del" onclick="pinDelete(${i})" title="Remove">✕</button>
+      <textarea placeholder="Write something…" oninput="pinEdit(${i},this.value)">${p.text || ''}</textarea>`;
+    div.addEventListener('dragstart', e => {
+      _pinDragIdx = i;
+      div.style.opacity = '0.4';
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    div.addEventListener('dragend', () => { div.style.opacity = ''; });
+    div.addEventListener('dragover', e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      div.style.outline = '2px dashed rgba(0,0,0,.3)';
+    });
+    div.addEventListener('dragleave', () => { div.style.outline = ''; });
+    div.addEventListener('drop', e => {
+      e.preventDefault();
+      div.style.outline = '';
+      const toIdx = parseInt(div.dataset.idx);
+      if (_pinDragIdx === null || _pinDragIdx === toIdx) return;
+      const pins2 = _pinLoad();
+      const [moved] = pins2.splice(_pinDragIdx, 1);
+      pins2.splice(toIdx, 0, moved);
+      _pinSave(pins2);
+      pinRender();
+    });
+    board.appendChild(div);
+  });
+  const add = document.createElement('div');
+  add.className = 'pinboard-add';
+  add.title = 'Add sticky note';
+  add.textContent = '+';
+  add.onclick = pinAdd;
+  board.appendChild(add);
+}
+
+function pinAdd() {
+  const pins = _pinLoad();
+  const color = PIN_COLORS[pins.length % PIN_COLORS.length];
+  pins.push({ text: '', color });
+  _pinSave(pins);
+  pinRender();
+  const board = document.getElementById('pinboard');
+  const notes = board.querySelectorAll('.sticky textarea');
+  if (notes.length) notes[notes.length - 1].focus();
+}
+
+function pinDelete(i) {
+  const pins = _pinLoad();
+  pins.splice(i, 1);
+  _pinSave(pins);
+  pinRender();
+}
+
+function pinEdit(i, val) {
+  const pins = _pinLoad();
+  if (pins[i]) { pins[i].text = val; _pinSave(pins); }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// To-do list
+// ═══════════════════════════════════════════════════════════════════════════
+function _todoLoad() { return _usTodos; }
+function _todoSave(items) { _usTodos = items; _persistUserState(); }
+
+function todoToggleHideDone() {
+  _usTodoHideDone = !_usTodoHideDone;
+  _persistUserState();
+  todoRender();
+  if (activeCourse) todoRenderCourse(activeCourse);
+}
+
+function _todoUpdateHideBtn() {
+  const btn = document.getElementById('todo-hide-done-btn');
+  if (btn) btn.textContent = _usTodoHideDone ? 'Show done' : 'Hide done';
+}
+
+function _todoDueLabel(due) {
+  if (!due) return null;
+  const today = new Date(); today.setHours(0,0,0,0);
+  const d     = new Date(due + 'T00:00:00');
+  const diff  = Math.round((d - today) / 86400000);
+  if (diff < 0)  return { cls: 'overdue',  label: `${Math.abs(diff)}d overdue` };
+  if (diff === 0) return { cls: 'today',    label: 'Today' };
+  if (diff === 1) return { cls: 'upcoming', label: 'Tomorrow' };
+  return { cls: 'upcoming', label: `${diff}d` };
+}
+
+function _todoItemHTML(item, i, opts = {}) {
+  const courseName = item.course ? item.course.split('/').pop() : null;
+  const linkPill   = courseName
+    ? `<span class="todo-course-pill" onclick="event.stopPropagation();todoUnlinkCourse(${i})" title="Unlink from course">${esc(courseName)} ✕</span>`
+    : `<button class="todo-link-btn" onclick="event.stopPropagation();todoShowCoursePicker(${i},this)" title="Link to course">@</button>`;
+  const dueInfo = _todoDueLabel(item.due);
+  const duePill = opts.courseView ? (dueInfo ? `<span class="todo-due ${dueInfo.cls}">${dueInfo.label}</span>` : '') : `
+    <input type="date" class="todo-due-input" value="${item.due || ''}"
+      title="Set due date"
+      onchange="todoDue(${i},this.value)"
+      style="opacity:0;position:absolute;pointer-events:none" id="todo-date-${i}">
+    ${dueInfo
+      ? `<button class="todo-due ${dueInfo.cls}" onclick="event.stopPropagation();document.getElementById('todo-date-${i}').showPicker?document.getElementById('todo-date-${i}').showPicker():document.getElementById('todo-date-${i}').click()" title="Change due date">${dueInfo.label}</button>`
+      : `<button class="todo-due upcoming" onclick="event.stopPropagation();document.getElementById('todo-date-${i}').showPicker?document.getElementById('todo-date-${i}').showPicker():document.getElementById('todo-date-${i}').click()" title="Set due date" style="opacity:0;transition:opacity .15s" onmouseenter="this.style.opacity=1" onmouseleave="this.style.opacity=0">📅</button>`
+    }`;
+  return `
+    <div class="todo-item" data-i="${i}" style="position:relative">
+      ${opts.courseView ? '' : '<span class="todo-drag-handle" draggable="false">⠿</span>'}
+      <input type="checkbox" class="todo-cb" ${item.done ? 'checked' : ''} onchange="todoToggle(${i},${!!opts.courseView})">
+      <textarea class="todo-text${item.done ? ' done' : ''}" rows="1"
+        onchange="todoEdit(${i}, this.value)"
+        oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px';todoEdit(${i},this.value)"
+        onkeydown="${opts.courseView ? '' : `todoKeydown(event,${i})`}"
+        ${opts.courseView ? 'readonly' : ''}
+      >${esc(item.text)}</textarea>
+      ${duePill}
+      ${opts.courseView ? '' : linkPill}
+      ${opts.courseView ? '' : `<button class="todo-del-btn" onclick="todoDelete(${i})" title="Delete">✕</button>`}
+    </div>`;
+}
+
+let _todoSortByDue = localStorage.getItem('todo_sort_due') === '1';
+
+function todoToggleSort() {
+  _todoSortByDue = !_todoSortByDue;
+  localStorage.setItem('todo_sort_due', _todoSortByDue ? '1' : '');
+  const btn = document.getElementById('todo-sort-btn');
+  if (btn) btn.classList.toggle('active', _todoSortByDue);
+  todoRender();
+}
+
+function todoDue(i, val) {
+  const items = _todoLoad();
+  if (!items[i]) return;
+  items[i].due = val || null;
+  _todoSave(items);
+  todoRender();
+  if (activeCourse) todoRenderCourse(activeCourse);
+}
+
+function _todoSortedItems(items) {
+  if (!_todoSortByDue) return items.map((item, i) => ({ item, i }));
+  // Sort: overdue first, then by date ascending, then undated at end, done at very end
+  return items
+    .map((item, i) => ({ item, i }))
+    .sort((a, b) => {
+      if (a.item.done !== b.item.done) return a.item.done ? 1 : -1;
+      const da = a.item.due || '9999-99-99';
+      const db = b.item.due || '9999-99-99';
+      return da.localeCompare(db);
+    });
+}
+
+let _todoDragIdx = null;
+
+function _todoDragWire(list) {
+  list.querySelectorAll('.todo-item').forEach(row => {
+    const handle = row.querySelector('.todo-drag-handle');
+    if (!handle) return;
+    handle.addEventListener('mousedown', () => { row.draggable = true; });
+    row.addEventListener('dragstart', e => {
+      _todoDragIdx = parseInt(row.dataset.i);
+      row.style.opacity = '0.4';
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    row.addEventListener('dragend', () => {
+      row.style.opacity = '';
+      row.draggable = false;
+      list.querySelectorAll('.todo-item').forEach(r => r.classList.remove('drag-over'));
+    });
+    row.addEventListener('dragover', e => {
+      e.preventDefault();
+      list.querySelectorAll('.todo-item').forEach(r => r.classList.remove('drag-over'));
+      row.classList.add('drag-over');
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
+    row.addEventListener('drop', e => {
+      e.preventDefault();
+      row.classList.remove('drag-over');
+      const toIdx = parseInt(row.dataset.i);
+      if (_todoDragIdx === null || _todoDragIdx === toIdx) return;
+      const items = _todoLoad();
+      const [moved] = items.splice(_todoDragIdx, 1);
+      items.splice(toIdx, 0, moved);
+      _todoSave(items);
+      todoRender();
+      if (activeCourse) todoRenderCourse(activeCourse);
+    });
+  });
+}
+
+function todoRender() {
+  const items = _todoLoad();
+  const list = document.getElementById('todo-list');
+  if (!list) return;
+  list.innerHTML = _todoSortedItems(items)
+    .filter(({ item }) => !(_usTodoHideDone && item.done))
+    .map(({ item, i }) => _todoItemHTML(item, i))
+    .join('');
+  list.querySelectorAll('.todo-text').forEach(t => { t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; });
+  _todoDragWire(list);
+  _todoUpdateHideBtn();
+  const btn = document.getElementById('todo-sort-btn');
+  if (btn) btn.classList.toggle('active', _todoSortByDue);
+}
+
+function todoRenderCourse(coursePath) {
+  const items = _todoLoad();
+  const linked = items
+    .map((item, i) => ({ item, i }))
+    .filter(({ item }) => item.course === coursePath && !(_usTodoHideDone && item.done));
+  const wrap = document.getElementById('course-todos-wrap');
+  if (!wrap) return;
+  // Show if there are linked todos (even if all hidden, keep header visible with toggle)
+  const allLinked = items.filter(item => item.course === coursePath);
+  if (!allLinked.length) { wrap.style.display = 'none'; return; }
+  wrap.style.display = 'block';
+  document.getElementById('course-todos-list').innerHTML =
+    linked.map(({ item, i }) => _todoItemHTML(item, i, { courseView: true })).join('');
+  wrap.querySelectorAll('.todo-text').forEach(t => { t.style.height = 'auto'; t.style.height = t.scrollHeight + 'px'; });
+}
+
+function todoAddItem(text = '', focus = true) {
+  const items = _todoLoad();
+  items.push({ text, done: false });
+  _todoSave(items);
+  todoRender();
+  if (focus) {
+    const inputs = document.querySelectorAll('#todo-list .todo-text');
+    if (inputs.length) { const last = inputs[inputs.length - 1]; last.focus(); last.setSelectionRange(last.value.length, last.value.length); }
+  }
+}
+
+function todoToggle(i, fromCourseView = false) {
+  const items = _todoLoad();
+  if (!items[i]) return;
+  items[i].done = !items[i].done;
+  _todoSave(items);
+  if (fromCourseView && activeCourse) todoRenderCourse(activeCourse); else todoRender();
+  // Also refresh the other view if visible
+  if (fromCourseView) todoRender();
+  else if (activeCourse) todoRenderCourse(activeCourse);
+}
+
+function todoEdit(i, val) {
+  const items = _todoLoad();
+  if (!items[i]) return;
+  items[i].text = val;
+  _todoSave(items);
+}
+
+function todoDelete(i) {
+  const items = _todoLoad();
+  items.splice(i, 1);
+  _todoSave(items);
+  todoRender();
+  if (activeCourse) todoRenderCourse(activeCourse);
+}
+
+function todoClearDone() {
+  _todoSave(_todoLoad().filter(t => !t.done));
+  todoRender();
+}
+
+function todoKeydown(e, i) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    const items = _todoLoad();
+    items.splice(i + 1, 0, { text: '', done: false });
+    _todoSave(items);
+    todoRender();
+    const inputs = document.querySelectorAll('#todo-list .todo-text');
+    if (inputs[i + 1]) { inputs[i + 1].focus(); }
+  }
+  if (e.key === 'Backspace') {
+    const items = _todoLoad();
+    if (items[i] && items[i].text === '' && items.length > 1) {
+      e.preventDefault();
+      items.splice(i, 1);
+      _todoSave(items);
+      todoRender();
+      const inputs = document.querySelectorAll('#todo-list .todo-text');
+      const prev = inputs[Math.max(0, i - 1)];
+      if (prev) { prev.focus(); prev.setSelectionRange(prev.value.length, prev.value.length); }
+    }
+  }
+}
+
+function todoShowCoursePicker(i, btnEl) {
+  document.querySelectorAll('.todo-course-picker').forEach(p => p.remove());
+  const picker = document.createElement('div');
+  picker.className = 'todo-course-picker';
+  const courses = allCourses.map(c =>
+    `<div class="tcp-item" data-path="${esc(c.path)}" onclick="todoLinkCourse(${i},'${esc(c.path)}');this.closest('.todo-course-picker').remove()">${esc(c.name.split('/').pop() || c.name)}</div>`
+  ).join('');
+  picker.innerHTML = `<div class="tcp-search-wrap"><input class="tcp-search" placeholder="Search course…" oninput="tcpFilter(this)" onkeydown="tcpKeydown(event,${i})" autofocus></div><div class="tcp-list">${courses}</div>`;
+  btnEl.closest('.todo-item').appendChild(picker);
+  setTimeout(() => picker.querySelector('.tcp-search')?.focus(), 10);
+  setTimeout(() => document.addEventListener('click', function h(e) {
+    if (!picker.contains(e.target)) { picker.remove(); document.removeEventListener('click', h); }
+  }), 10);
+}
+
+function tcpFilter(input) {
+  const q = input.value.toLowerCase();
+  const picker = input.closest('.todo-course-picker');
+  picker.querySelectorAll('.tcp-item').forEach(el => {
+    el.style.display = el.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+  // Reset highlight
+  picker.querySelectorAll('.tcp-item.tcp-active').forEach(el => el.classList.remove('tcp-active'));
+}
+
+function tcpKeydown(e, i) {
+  const picker = e.target.closest('.todo-course-picker');
+  const visible = [...picker.querySelectorAll('.tcp-item')].filter(el => el.style.display !== 'none');
+  const cur = picker.querySelector('.tcp-item.tcp-active');
+  let idx = visible.indexOf(cur);
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    const next = visible[Math.min(idx + 1, visible.length - 1)];
+    if (cur) cur.classList.remove('tcp-active');
+    if (next) { next.classList.add('tcp-active'); next.scrollIntoView({ block: 'nearest' }); }
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    const prev = visible[Math.max(idx - 1, 0)];
+    if (cur) cur.classList.remove('tcp-active');
+    if (prev) { prev.classList.add('tcp-active'); prev.scrollIntoView({ block: 'nearest' }); }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    const active = picker.querySelector('.tcp-item.tcp-active') || visible[0];
+    if (active) { todoLinkCourse(i, active.dataset.path); picker.remove(); }
+  } else if (e.key === 'Escape') {
+    picker.remove();
+  }
+}
+
+function todoLinkCourse(i, path) {
+  const items = _todoLoad();
+  if (!items[i]) return;
+  items[i].course = path;
+  _todoSave(items);
+  todoRender();
+  if (activeCourse) todoRenderCourse(activeCourse);
+}
+
+function todoUnlinkCourse(i) {
+  const items = _todoLoad();
+  if (!items[i]) return;
+  delete items[i].course;
+  _todoSave(items);
+  todoRender();
+  if (activeCourse) todoRenderCourse(activeCourse);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Home
 // ═══════════════════════════════════════════════════════════════════════════
-function renderHome(courses, pipeline, streak) {
-  const total      = courses.length;
-  const withSum    = courses.filter(c => c.has_summary).length;
-  const totalFiles = courses.reduce((a, c) => a + c.file_count, 0);
-  const totalQ     = courses.reduce((a, c) => a + c.progress.total, 0);
-  const totalKnown = courses.reduce((a, c) => a + c.progress.known, 0);
-  const masteryPct = totalQ ? Math.round(totalKnown / totalQ * 100) : 0;
-  const summaryPct = total ? Math.round(withSum / total * 100) : 0;
-
-  document.getElementById('stats-grid').innerHTML = `
-    <div class="stat-card" style="--accent:var(--blue)">
-      <div class="stat-label">📚 Kurse</div>
-      <div class="stat-value">${total}</div>
-      <div class="stat-sub">${withSum} mit Zusammenfassung</div>
-      <div class="stat-bar"><div class="stat-bar-fill" style="width:${summaryPct}%;background:linear-gradient(90deg,var(--blue),#60a5fa)"></div></div>
-    </div>
-    <div class="stat-card" style="--accent:var(--green)">
-      <div class="stat-label">📁 Dateien gesamt</div>
-      <div class="stat-value">${totalFiles}</div>
-      <div class="stat-sub">in allen Kursen</div>
-    </div>
-    <div class="stat-card" style="--accent:var(--yellow)">
-      <div class="stat-label">🃏 Lernkarten</div>
-      <div class="stat-value">${totalQ}</div>
-      <div class="stat-sub">${totalKnown} bekannt · ${totalQ - totalKnown} offen</div>
-      ${totalQ ? `<div class="stat-bar"><div class="stat-bar-fill" style="width:${masteryPct}%;background:linear-gradient(90deg,var(--yellow),var(--orange))"></div></div>` : ''}
-    </div>
-    <div class="stat-card" style="--accent:var(--purple)">
-      <div class="stat-label">🎯 Lernfortschritt</div>
-      <div class="stat-value">${masteryPct}<span style="font-size:18px;font-weight:500;color:var(--text3)">%</span></div>
-      <div class="stat-sub">Gesamt-Mastery</div>
-      <div class="stat-bar"><div class="stat-bar-fill" style="width:${masteryPct}%;background:linear-gradient(90deg,var(--blue),var(--purple))"></div></div>
-    </div>
-    <div class="stat-card" style="--accent:var(--orange)">
-      <div class="stat-label">🔥 Lernsträhne</div>
-      <div class="stat-value">${streak?.count || 0}<span style="font-size:18px;font-weight:500;color:var(--text3)"> Tage</span></div>
-      <div class="stat-sub">${streak?.last_date ? 'Zuletzt: ' + new Date(streak.last_date).toLocaleDateString('de-DE') : 'Noch nicht gelernt'}</div>
-    </div>`;
-
-  const pOk = pipeline.last_ok;
-  const pending = allCourses.filter(c => !c.has_summary && c.file_count > 0).length;
-  document.getElementById('pipeline-card-wrap').innerHTML = `
-    <div class="pipeline-card" style="margin-bottom:24px">
-      <div class="pipeline-dot" style="background:${pOk ? 'var(--green)' : 'var(--text3)'}"></div>
-      <div>
-        <div style="font-size:13px;font-weight:600;color:var(--text)">Pipeline</div>
-        <div style="font-size:12px;color:var(--text3);margin-top:3px">
-          ${pOk ? `Letzter Lauf: ${pOk}` : 'Noch nie gelaufen'}
-          &nbsp;·&nbsp; Mo + Do 08:00
-        </div>
-      </div>
-      <div style="flex:1"></div>
-      <select id="global-lang-select" onchange="localStorage.setItem('summary_lang',this.value);toast('Sprache gespeichert','ok')" style="font-size:12px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text2);padding:5px 8px;outline:none;cursor:pointer" title="Sprache für Zusammenfassungen">
-        <option value="en" ${(localStorage.getItem('summary_lang')||'en')==='en'?'selected':''}>🇬🇧 English</option>
-        <option value="de" ${(localStorage.getItem('summary_lang')||'en')==='de'?'selected':''}>🇩🇪 Deutsch</option>
-      </select>
-      ${pending > 0 ? `<button class="tbtn btn-green" onclick="runBulkSummarize()" title="${pending} Kurse ohne Zusammenfassung">✨ Alle zusammenfassen (${pending})</button>` : ''}
-      <button class="tbtn btn-purple" onclick="startGlobalLearn()">🧠 Alle lernen</button>
-      <button class="tbtn btn-gray" onclick="runScraper()">↓ Sync</button>
-    </div>`;
-
-  const recent = [...courses]
-    .filter(c => c.summary_age)
-    .sort((a, b) => b.summary_age - a.summary_age)
-    .slice(0, 8);
-
+function renderHome(courses) {
   // Recommendations — only from the current (newest) semester
   const currentSem = courseTree.find(item => item.is_semester);
   const currentSemCourses = currentSem
@@ -2348,20 +3106,24 @@ function renderHome(courses, pipeline, streak) {
     recWrap.innerHTML = '';
   }
 
-  document.getElementById('recent-list').innerHTML = recent.length ? recent.map(c => {
-    const pct = c.progress.total ? Math.round(c.progress.known / c.progress.total * 100) : null;
-    return `
-    <div class="recent-item" data-course="${esc(c.path)}" onclick="selectCourseFromEl(this)">
-      <span style="font-size:20px">${c.has_notes ? '📝' : '📚'}</span>
-      <div class="recent-item-name">${esc(c.name)}</div>
-      <div class="recent-item-meta">${c.file_count} Dateien</div>
-      ${pct !== null ? `
-        <div class="recent-item-progress">
-          <div style="font-size:10px;color:var(--text3);text-align:right">${c.progress.known}/${c.progress.total}</div>
-          <div class="recent-progress-bar"><div class="recent-progress-fill" style="width:${pct}%"></div></div>
-        </div>` : ''}
-    </div>`;
-  }).join('') : '<div style="color:var(--text3);font-size:13px">Noch keine Zusammenfassungen erstellt</div>';
+  // Sync tile — prefer per-course _last_sync, fall back to courses.json mtime
+  const lastSync = Math.max(0, ...courses.map(c => c.sync_age || 0)) || _lastSyncGlobal || 0;
+  const syncTile = document.getElementById('sync-tile');
+  if (syncTile) {
+    if (lastSync) {
+      const now = Math.floor(Date.now() / 1000);
+      const diff = now - lastSync;
+      let label;
+      if (diff < 60)           label = 'just now';
+      else if (diff < 3600)    label = `${Math.floor(diff/60)}m ago`;
+      else if (diff < 86400)   label = `${Math.floor(diff/3600)}h ago`;
+      else                     label = `${Math.floor(diff/86400)}d ago`;
+      syncTile.innerHTML = `<span class="sync-dot"></span>Last sync: ${label}`;
+      syncTile.style.display = '';
+    } else {
+      syncTile.style.display = 'none';
+    }
+  }
 }
 
 function buildRecommendations(courses) {
@@ -2372,7 +3134,7 @@ function buildRecommendations(courses) {
   const newFiles = courses.filter(c => c.new_files > 0);
   if (newFiles.length) {
     const c = newFiles.sort((a, b) => b.new_files - a.new_files)[0];
-    recs.push({ path: c.path, name: c.name, reason: '📂 Neue Dateien', meta: `${c.new_files} neue Datei${c.new_files > 1 ? 'en' : ''} seit letzter Zusammenfassung`, accent: 'var(--yellow)' });
+    recs.push({ path: c.path, name: c.name, reason: '📂 New files', meta: `${c.new_files} new file${c.new_files > 1 ? 's' : ''} since last summary`, accent: 'var(--yellow)' });
   }
 
   // 2. Kurs mit niedrigstem Lernfortschritt (der Lernkarten hat)
@@ -2384,14 +3146,14 @@ function buildRecommendations(courses) {
       return pa - pb;
     })[0];
     const pct = Math.round(c.progress.known / c.progress.total * 100);
-    if (pct < 80) recs.push({ path: c.path, name: c.name, reason: '📉 Lernrückstand', meta: `${pct}% bekannt (${c.progress.known}/${c.progress.total} Karten)`, accent: 'var(--red)' });
+    if (pct < 80) recs.push({ path: c.path, name: c.name, reason: '📉 Behind on studying', meta: `${pct}% known (${c.progress.known}/${c.progress.total} cards)`, accent: 'var(--red)' });
   }
 
   // 3. Kurs ohne Zusammenfassung aber mit Dateien
   const noSummary = courses.filter(c => !c.has_summary && c.file_count > 0);
   if (noSummary.length) {
     const c = noSummary.sort((a, b) => b.file_count - a.file_count)[0];
-    recs.push({ path: c.path, name: c.name, reason: '⚠️ Keine Zusammenfassung', meta: `${c.file_count} Datei${c.file_count > 1 ? 'en' : ''} vorhanden`, accent: 'var(--orange)' });
+    recs.push({ path: c.path, name: c.name, reason: '⚠️ No summary', meta: `${c.file_count} file${c.file_count > 1 ? 's' : ''} available`, accent: 'var(--orange)' });
   }
 
   // 4. Am längsten nicht gelernt (aus denen mit Lernkarten)
@@ -2399,7 +3161,7 @@ function buildRecommendations(courses) {
   if (withLast.length) {
     const c = withLast.sort((a, b) => new Date(a.progress.last_studied) - new Date(b.progress.last_studied))[0];
     const days = Math.floor((Date.now() - new Date(c.progress.last_studied)) / 86400000);
-    if (days >= 3) recs.push({ path: c.path, name: c.name, reason: '⏰ Lange nicht gelernt', meta: `Vor ${days} Tag${days > 1 ? 'en' : ''} zuletzt geübt`, accent: 'var(--purple)' });
+    if (days >= 3) recs.push({ path: c.path, name: c.name, reason: '⏰ Not studied recently', meta: `Last studied ${days} day${days > 1 ? 's' : ''} ago`, accent: 'var(--purple)' });
   }
 
   return recs.slice(0, 3);
@@ -2413,11 +3175,86 @@ function goHome() {
   filterAndRenderSidebar();
 }
 
+function goCoursesOverview() {
+  activeCourse = null;
+  document.getElementById('tabs').style.display = 'none';
+  document.getElementById('course-title-bar').style.display = 'none';
+  showPanel('courses');
+  filterAndRenderSidebar();
+  renderCoursesOverview();
+}
+
+function renderCoursesOverview() {
+  const body = document.getElementById('courses-overview-body');
+  if (!body) return;
+
+  // Accent colors cycling per semester
+  const ACCENTS = ['var(--blue)','var(--purple)','var(--green)','var(--yellow)','var(--orange)','var(--red)'];
+
+  // Separate semesters from ungrouped
+  const semesters = courseTree.filter(item => item.is_group && item.is_semester);
+  const ungrouped = courseTree.filter(item => !item.is_group);
+  const otherGroups = courseTree.filter(item => item.is_group && !item.is_semester);
+
+  const archived = getArchived();
+  const hidden   = getHidden();
+
+  function cardHTML(c) {
+    if (archived.includes(c.path) || hidden.includes(c.path)) return '';
+    const newLine = c.new_files
+      ? `<div style="font-size:11px;color:var(--yellow);margin-top:3px">+${c.new_files} new since last sync</div>`
+      : '';
+    return `
+      <div class="co-card" onclick="selectCourse('${esc(c.path)}')" title="${esc(c.name)}">
+        <div class="co-card-accent" style="background:ACCENT"></div>
+        <div class="co-card-name">${esc(c.name)}</div>
+        ${newLine}
+      </div>`;
+  }
+
+  let html = '';
+
+  semesters.forEach((sem, si) => {
+    const accent = ACCENTS[si % ACCENTS.length];
+    const cards = sem.courses.map(c => cardHTML(c).replace('ACCENT', accent)).filter(Boolean).join('');
+    if (!cards) return;
+    html += `<div class="co-semester">
+      <div class="co-semester-title">${esc(sem.name)}</div>
+      <div class="co-grid">${cards}</div>
+    </div>`;
+  });
+
+  otherGroups.forEach((grp, gi) => {
+    const accent = ACCENTS[(semesters.length + gi) % ACCENTS.length];
+    const cards = grp.courses.map(c => cardHTML(c).replace('ACCENT', accent)).filter(Boolean).join('');
+    if (!cards) return;
+    html += `<div class="co-semester">
+      <div class="co-semester-title">${esc(grp.name)}</div>
+      <div class="co-grid">${cards}</div>
+    </div>`;
+  });
+
+  if (ungrouped.length) {
+    const accent = ACCENTS[(semesters.length + otherGroups.length) % ACCENTS.length];
+    const cards = ungrouped.map(c => cardHTML(c).replace('ACCENT', accent)).filter(Boolean).join('');
+    if (cards) {
+      html += `<div class="co-semester">
+        <div class="co-semester-title">All courses</div>
+        <div class="co-grid">${cards}</div>
+      </div>`;
+    }
+  }
+
+  body.innerHTML = html || '<div style="color:var(--text3);padding:20px">No courses found.</div>';
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Course selection
 // ═══════════════════════════════════════════════════════════════════════════
 async function selectCourse(path) {
   activeCourse = path;
+  localStorage.setItem('last_course', path);
+  _expandedFolders.clear();
   filterAndRenderSidebar();
   document.getElementById('tabs').style.display = 'flex';
   document.getElementById('course-title-bar').style.display = 'flex';
@@ -2429,6 +3266,7 @@ async function selectCourse(path) {
   document.getElementById('file-list')?.classList.remove('selection-mode');
   switchTab('files');
   loadFiles();
+  todoRenderCourse(path);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2436,6 +3274,7 @@ async function selectCourse(path) {
 // ═══════════════════════════════════════════════════════════════════════════
 function switchTab(tab) {
   activeTab = tab;
+  if (activeCourse) localStorage.setItem('last_tab', tab);
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === tab));
   showPanel(tab);
   if (tab === 'files') _updateSummarizeBtn();
@@ -2456,6 +3295,60 @@ function showPanel(name) {
 // ═══════════════════════════════════════════════════════════════════════════
 let fileSort = localStorage.getItem('file_sort') || 'name';
 let activePreviewFile = null;
+let _allLoadedFiles = [];
+let _allLoadedMeta  = {};
+
+function filterFileList(q) {
+  const clearBtn = document.getElementById('file-search-clear');
+  if (clearBtn) clearBtn.style.display = q ? '' : 'none';
+  _renderFileListWithFilter(q);
+}
+
+function clearFileSearch() {
+  const inp = document.getElementById('file-search');
+  if (inp) { inp.value = ''; inp.dispatchEvent(new Event('input')); inp.focus(); }
+}
+
+function _renderFileListWithFilter(q) {
+  const el = document.getElementById('file-list');
+  if (!el) return;
+  const course = allCourses.find(c => c.path === activeCourse);
+  const summaryAge = course?.sync_age || course?.summary_age || 0;
+  const newCount = course?.new_files || 0;
+
+  const banner = newCount > 0
+    ? `<div style="margin-bottom:8px;padding:7px 10px;background:rgba(234,179,8,.1);border:1px solid rgba(234,179,8,.3);border-radius:6px;font-size:11px;color:var(--yellow)">
+        ⚠ ${newCount} new file${newCount>1?'s':''} since last sync
+       </div>`
+    : '';
+
+  const lower = (q || '').toLowerCase();
+  if (lower) {
+    // Flat filtered list — skip tree, show matches directly
+    const matches = _allLoadedFiles.filter(f => f.toLowerCase().includes(lower));
+    if (!matches.length) {
+      el.innerHTML = banner + `<div style="color:var(--text3);font-size:12px;padding:8px">No files matching "${esc(q)}"</div>`;
+      return;
+    }
+    el.innerHTML = banner + matches.map(f => {
+      const m = _allLoadedMeta[f] || {};
+      const isNew = summaryAge && m.mtime && m.mtime > summaryAge;
+      const read = isFileRead(activeCourse, f);
+      const displayName = f; // show full path so context is clear
+      return `
+        <div class="file-item${isNew ? ' new-file' : ''}${read ? ' file-read' : ''}" data-filename="${esc(f)}"
+             style="padding-left:8px" onclick="previewFileFromEl(this)">
+          <input type="checkbox" name="file" value="${esc(f)}" checked onclick="event.stopPropagation()" onchange="if(selectionMode)updateSelectionToolbar()">
+          <span class="file-icon">${fileIcon(f)}</span>
+          <span class="file-name" title="${esc(f)}">${esc(displayName)}</span>
+          ${isNew ? '<span class="new-badge" style="flex-shrink:0">New</span>' : ''}
+          <span class="file-read-check">${read ? '✓' : ''}</span>
+        </div>`;
+    }).join('');
+  } else {
+    el.innerHTML = banner + renderFileTree(buildFileTree(_allLoadedFiles), _allLoadedFiles, summaryAge, _allLoadedMeta, 0);
+  }
+}
 
 function setFileSort(val) {
   fileSort = val;
@@ -2472,7 +3365,7 @@ async function loadFiles() {
   ]);
   const el = document.getElementById('file-list');
   if (!files.length) {
-    el.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:8px">Keine Dateien</div>';
+    el.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:8px">No files</div>';
     return;
   }
   const metaMap = Object.fromEntries((meta || []).map(m => [m.name, m]));
@@ -2484,19 +3377,17 @@ async function loadFiles() {
     files.sort((a, b) => (metaMap[b]?.mtime || 0) - (metaMap[a]?.mtime || 0));
   }
 
-  // Find summary age for highlighting new files
-  const course = allCourses.find(c => c.path === activeCourse);
-  const summaryAge = course?.summary_age || 0;
+  // Store for filtering
+  _allLoadedFiles = files;
+  _allLoadedMeta  = metaMap;
 
-  // New-files banner
-  const newCount = course?.new_files || 0;
-  const banner = newCount > 0
-    ? `<div style="margin-bottom:8px;padding:7px 10px;background:rgba(234,179,8,.1);border:1px solid rgba(234,179,8,.3);border-radius:6px;font-size:11px;color:var(--yellow)">
-        ⚠ ${newCount} neue Datei${newCount>1?'en':''} seit letzter Zusammenfassung
-       </div>`
-    : '';
+  // Clear search box on course change
+  const searchInp = document.getElementById('file-search');
+  if (searchInp) searchInp.value = '';
+  const clearBtn = document.getElementById('file-search-clear');
+  if (clearBtn) clearBtn.style.display = 'none';
 
-  el.innerHTML = banner + renderFileTree(buildFileTree(files), files, summaryAge, metaMap, 0);
+  _renderFileListWithFilter('');
 
   // Re-open last viewed file
   const lastFile = localStorage.getItem('last_file__' + activeCourse);
@@ -2525,8 +3416,8 @@ function countTreeFiles(node) {
   return node.files.length + Object.values(node.dirs).reduce((s, d) => s + countTreeFiles(d), 0);
 }
 
-// Globally track collapsed folder paths for the current course
-const _collapsedFolders = new Set();
+// Track which folders are explicitly expanded (default: all collapsed)
+const _expandedFolders = new Set();
 
 function hasNewFilesInTree(node, metaMap, summaryAge) {
   if (!summaryAge) return false;
@@ -2557,7 +3448,7 @@ function renderFileTree(node, allFiles, summaryAge, metaMap, depth) {
       <input type="checkbox" name="file" value="${esc(f)}" checked onclick="event.stopPropagation()" onchange="if(selectionMode)updateSelectionToolbar()">
       <span class="file-icon">${fileIcon(f)}</span>
       <span class="file-name" title="${esc(f)}">${esc(displayName)}</span>
-      ${isNew ? '<span class="new-badge" style="flex-shrink:0">Neu</span>' : ''}
+      ${isNew ? '<span class="new-badge" style="flex-shrink:0">New</span>' : ''}
       ${dateStr ? `<span class="file-date">${dateStr}</span>` : ''}
       <span class="file-read-check">${read ? '✓' : ''}</span>
     </div>`;
@@ -2566,7 +3457,7 @@ function renderFileTree(node, allFiles, summaryAge, metaMap, depth) {
   // Subfolders
   for (const [name, child] of Object.entries(node.dirs).sort(([a],[b]) => a.localeCompare(b))) {
     const folderPath = child.path;
-    const collapsed = _collapsedFolders.has(folderPath);
+    const collapsed = !_expandedFolders.has(folderPath);
     const count = countTreeFiles(child);
     const folderIsNew = hasNewFilesInTree(child, metaMap, summaryAge);
     html += `
@@ -2575,7 +3466,7 @@ function renderFileTree(node, allFiles, summaryAge, metaMap, depth) {
       <span class="folder-chevron">▼</span>
       <span class="folder-icon">📁</span>
       <span class="folder-name">${esc(name)}</span>
-      ${folderIsNew ? '<span class="folder-new-badge">Neu</span>' : ''}
+      ${folderIsNew ? '<span class="folder-new-badge">New</span>' : ''}
       <span class="folder-count">${count}</span>
     </div>
     <div class="folder-contents${collapsed ? ' collapsed' : ''}" data-folder="${esc(folderPath)}">
@@ -2586,11 +3477,11 @@ function renderFileTree(node, allFiles, summaryAge, metaMap, depth) {
 }
 
 function toggleFileFolder(path, headerEl) {
-  const collapsed = _collapsedFolders.has(path);
-  if (collapsed) _collapsedFolders.delete(path); else _collapsedFolders.add(path);
-  headerEl.classList.toggle('collapsed', !collapsed);
+  const expanded = _expandedFolders.has(path);
+  if (expanded) _expandedFolders.delete(path); else _expandedFolders.add(path);
+  headerEl.classList.toggle('collapsed', expanded);
   const contents = document.querySelector(`.folder-contents[data-folder="${CSS.escape(path)}"]`);
-  if (contents) contents.classList.toggle('collapsed', !collapsed);
+  if (contents) contents.classList.toggle('collapsed', expanded);
 }
 
 function previewFileFromEl(el) { previewFile(el.dataset.filename); }
@@ -2625,10 +3516,10 @@ function _downloadPlaceholder(filename, rawUrl, errorMsg) {
     <div class="icon">${fileIcon(filename)}</div>
     <div style="margin-bottom:6px;color:var(--text2);font-weight:500">${esc(name)}</div>
     ${errorMsg ? `<div style="font-size:11px;color:var(--red);margin-bottom:12px">${esc(errorMsg)}</div>`
-               : `<div style="font-size:12px;color:var(--text3);margin-bottom:16px">Keine Vorschau verfügbar</div>`}
+               : `<div style="font-size:12px;color:var(--text3);margin-bottom:16px">No preview available</div>`}
     <a href="${rawUrl}" download
        style="background:var(--blue);color:#fff;padding:9px 22px;border-radius:8px;text-decoration:none;font-size:13px;font-weight:600">
-      ⬇ Herunterladen
+      ⬇ Download
     </a>
   </div>`;
 }
@@ -2656,8 +3547,20 @@ function _startReadTimer(filename) {
   }, 1000);
 }
 
+function _saveScrollPos() {
+  if (!activeCourse || !activePreviewFile) return;
+  const body = document.getElementById('preview-body');
+  if (body) localStorage.setItem('last_scroll__' + activeCourse + '__' + activePreviewFile, body.scrollTop);
+}
+
 async function previewFile(filename) {
   _clearReadTimer();
+  // Save scroll position of the file we're leaving
+  _saveScrollPos();
+  // Tear down any active PDF so the ResizeObserver can't re-render it into a non-PDF view
+  if (_pdfRO) { _pdfRO.disconnect(); _pdfRO = null; }
+  if (_pdfDoc) { _pdfDoc.destroy(); _pdfDoc = null; }
+  pdfFindClose();
   activePreviewFile = filename;
   localStorage.setItem('last_file__' + activeCourse, filename);
   _loadFileNote(filename); // load notes for this file if panel is open
@@ -2671,6 +3574,7 @@ async function previewFile(filename) {
   const read = isFileRead(activeCourse, filename);
 
   const isPdf = ext === 'pdf';
+  document.getElementById('pdf-find-topbar-btn').style.display = isPdf ? '' : 'none';
   header.innerHTML = `
     <span class="preview-header-name">${esc(filename.split('/').pop())}</span>
     ${isPdf ? `
@@ -2678,17 +3582,17 @@ async function previewFile(filename) {
       <div class="zoom-controls">
         <button class="zoom-btn" onclick="changePdfZoom(-20)" title="Verkleinern">−</button>
         <span class="zoom-label" id="zoom-label">Auto</span>
-        <button class="zoom-btn" onclick="changePdfZoom(20)" title="Vergrößern">+</button>
+        <button class="zoom-btn" onclick="changePdfZoom(20)" title="Zoom in">+</button>
       </div>` : ''}
     <button id="read-toggle-btn" class="read-toggle-btn${read ? ' is-read' : ''}"
-      onclick="toggleReadFile('${esc(filename)}')">${read ? '✓ Gelesen' : 'Als gelesen markieren'}</button>
-    <a href="/api/file-raw/${enc(activeCourse)}/${enc(filename)}" download title="Herunterladen"
+      onclick="toggleReadFile('${esc(filename)}')">${read ? '✓ Read' : 'Mark as read'}</button>
+    <a href="/api/file-raw/${enc(activeCourse)}/${enc(filename)}" download title="Download"
        style="color:var(--text3);font-size:13px;text-decoration:none" onclick="event.stopPropagation()">⬇</a>
-    <button id="fnotes-toggle-btn" onclick="toggleFileNotes()" title="Datei-Notizen (N)"
+    <button id="fnotes-toggle-btn" onclick="toggleFileNotes()" title="File notes (N)"
       style="background:none;border:none;cursor:pointer;font-size:13px;padding:2px 5px;border-radius:4px;color:var(--text3);transition:color var(--transition),background var(--transition)"
       onmouseover="this.style.background='var(--bg4)'" onmouseout="this.style.background='none'">✏️</button>
     ${isPdf ? `<button id="fullscreen-btn" onclick="togglePreviewFullscreen()" title="Vollbild (F)">⛶</button>` : ''}`;
-  body.innerHTML = '<div class="preview-placeholder"><div class="icon">⏳</div><div>Lade…</div></div>';
+  body.innerHTML = '<div class="preview-placeholder"><div class="icon">⏳</div><div>Loading…</div></div>';
   body.className = 'preview-body';
 
   const rawUrl = `/api/file-raw/${enc(activeCourse)}/${enc(filename)}`;
@@ -2701,13 +3605,15 @@ async function previewFile(filename) {
     await _loadPdfJs(body);
     _setupPdfResizeObserver(body);
     _setupPdfWheelZoom(body);
+    _restoreScrollPos(filename);
   } else if (IMAGE_EXT.has(ext)) {
     body.className = 'preview-body';
     body.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:20px">
       <img src="${rawUrl}" alt="${esc(filename.split('/').pop())}"
            style="max-width:100%;max-height:70vh;border-radius:6px;box-shadow:var(--shadow)">
-      <a href="${rawUrl}" download style="font-size:12px;color:var(--text3)">⬇ Herunterladen</a>
+      <a href="${rawUrl}" download style="font-size:12px;color:var(--text3)">⬇ Download</a>
     </div>`;
+    _restoreScrollPos(filename);
   } else if (AUDIO_EXT.has(ext)) {
     body.className = 'preview-body';
     body.innerHTML = `<div class="preview-placeholder">
@@ -2715,34 +3621,40 @@ async function previewFile(filename) {
       <div style="margin-bottom:16px;color:var(--text2)">${esc(filename.split('/').pop())}</div>
       <audio controls style="width:100%;max-width:400px">
         <source src="${rawUrl}">
-        Dein Browser unterstützt kein Audio-Playback.
+        Your browser does not support audio playback.
       </audio>
-      <a href="${rawUrl}" download style="margin-top:12px;font-size:12px;color:var(--text3)">⬇ Herunterladen</a>
+      <a href="${rawUrl}" download style="margin-top:12px;font-size:12px;color:var(--text3)">⬇ Download</a>
     </div>`;
   } else if (VIDEO_EXT.has(ext)) {
     body.className = 'preview-body';
     body.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;gap:12px;padding:20px">
-      <video controls style="max-width:100%;max-height:70vh;border-radius:6px;box-shadow:var(--shadow)">
-        <source src="${rawUrl}">
-        Dein Browser unterstützt kein Video-Playback.
-      </video>
-      <a href="${rawUrl}" download style="font-size:12px;color:var(--text3)">⬇ Herunterladen</a>
+      <div id="video-wrap" style="width:100%"></div>
+      <a href="${rawUrl}" download style="font-size:12px;color:var(--text3)">⬇ Download</a>
     </div>`;
+    // Create video element programmatically so the browser does not auto-mute it
+    const vid = document.createElement('video');
+    vid.controls = true;
+    vid.muted = false;
+    vid.style.cssText = 'max-width:100%;max-height:70vh;border-radius:6px;box-shadow:var(--shadow);display:block;margin:0 auto';
+    vid.src = rawUrl;
+    document.getElementById('video-wrap').appendChild(vid);
   } else if (PREVIEWABLE_EXT.has(ext)) {
     const data = await fetch(`/api/file-text/${enc(activeCourse)}/${enc(filename)}`).then(r => r.json());
     const text = data.text || '';
     if (text && !text.startsWith('Fehler')) {
       body.className = 'preview-body';
       body.innerHTML = `<div style="margin-bottom:12px;text-align:right">
-        <a href="${rawUrl}" download style="font-size:11px;color:var(--text3);text-decoration:none">⬇ Herunterladen</a>
+        <a href="${rawUrl}" download style="font-size:11px;color:var(--text3);text-decoration:none">⬇ Download</a>
       </div>${esc(text)}`;
     } else {
       body.className = 'preview-body';
       body.innerHTML = _downloadPlaceholder(filename, rawUrl, text || '');
     }
+    _restoreScrollPos(filename);
   } else {
     body.className = 'preview-body';
     body.innerHTML = _downloadPlaceholder(filename, rawUrl, '');
+    _restoreScrollPos(filename);
   }
   _startReadTimer(filename);
 }
@@ -2762,6 +3674,22 @@ function toggleReadFile(filename) {
   else _startReadTimer(filename);
   filterAndRenderSidebar(); // update completion indicator
 }
+
+function _restoreScrollPos(filename) {
+  const key = 'last_scroll__' + activeCourse + '__' + filename;
+  const saved = parseFloat(localStorage.getItem(key) || '0');
+  if (!saved) return;
+  requestAnimationFrame(() => {
+    const body = document.getElementById('preview-body');
+    if (body) body.scrollTop = saved;
+  });
+}
+
+// Continuously save scroll position while user is scrolling
+document.addEventListener('DOMContentLoaded', () => {
+  const body = document.getElementById('preview-body');
+  if (body) body.addEventListener('scroll', () => _saveScrollPos(), { passive: true });
+});
 
 // ── PDF.js state ─────────────────────────────────────────────────────────
 let _pdfUrl      = '';
@@ -2784,7 +3712,7 @@ async function _loadPdfJs(container) {
   try {
     _pdfDoc = await pdfjsLib.getDocument(_pdfUrl).promise;
   } catch(e) {
-    container.innerHTML = `<div style="color:var(--red);padding:20px">Fehler: ${e.message}</div>`;
+    container.innerHTML = `<div style="color:var(--red);padding:20px">Error: ${e.message}</div>`;
     return;
   }
   // Cache page-1 natural width so _pdfAutoScale() doesn't need to be async.
@@ -2876,22 +3804,30 @@ async function _renderPdf(container) {
 
   _updateZoomLabel(container, scale);
   _setupPdfPageIndicator(container);
+  // Re-apply any active find highlights after re-render
+  if (_pdfFindTerm) requestAnimationFrame(() => pdfFindRun(_pdfFindTerm));
 }
 
 let _pdfPageObserver = null;
+let _pdfPageRatios   = new Map();
 function _setupPdfPageIndicator(container) {
   if (_pdfPageObserver) _pdfPageObserver.disconnect();
+  _pdfPageRatios.clear();
   const ind = document.getElementById('pdf-page-ind');
   if (!ind || !_pdfDoc) return;
   const canvases = [...container.querySelectorAll('.pdf-page-canvas')];
   ind.textContent = `1 / ${canvases.length}`;
   _pdfPageObserver = new IntersectionObserver(entries => {
-    const best = entries
-      .filter(e => e.isIntersecting)
-      .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
-    if (best) ind.textContent = `${canvases.indexOf(best.target) + 1} / ${canvases.length}`;
-  }, { root: container, threshold: [0.1, 0.5] });
-  canvases.forEach(c => _pdfPageObserver.observe(c));
+    // Update the persistent ratio map for every changed entry
+    entries.forEach(e => _pdfPageRatios.set(e.target, e.intersectionRatio));
+    // Pick the canvas with the highest visible ratio across ALL observed canvases
+    let bestCanvas = null, bestRatio = -1;
+    _pdfPageRatios.forEach((ratio, canvas) => {
+      if (ratio > bestRatio) { bestRatio = ratio; bestCanvas = canvas; }
+    });
+    if (bestCanvas) ind.textContent = `${canvases.indexOf(bestCanvas) + 1} / ${canvases.length}`;
+  }, { root: container, threshold: Array.from({length: 11}, (_, i) => i * 0.1) });
+  canvases.forEach(c => { _pdfPageRatios.set(c, 0); _pdfPageObserver.observe(c); });
 }
 
 function _updateZoomLabel(container, scale) {
@@ -2941,6 +3877,85 @@ function _setupPdfWheelZoom(body) {
   }, { passive: false });
 }
 
+// ── PDF in-page search ────────────────────────────────────────────────────────
+let _pdfFindMatches = [];
+let _pdfFindIdx     = -1;
+let _pdfFindTerm    = '';
+
+function togglePdfFind() {
+  const bar = document.getElementById('pdf-find-bar');
+  if (!bar) return;
+  if (bar.style.display === 'flex') { pdfFindClose(); }
+  else { bar.style.display = 'flex'; document.getElementById('pdf-find-input').focus(); }
+}
+
+function pdfFindClose() {
+  const bar = document.getElementById('pdf-find-bar');
+  if (bar) bar.style.display = 'none';
+  _pdfFindClear();
+  const inp = document.getElementById('pdf-find-input');
+  if (inp) inp.value = '';
+  _pdfFindUpdateCount();
+}
+
+function _pdfFindClear() {
+  document.querySelectorAll('#preview-body .pdf-hl').forEach(el => {
+    el.classList.remove('pdf-hl', 'pdf-hl-cur');
+  });
+  _pdfFindMatches = []; _pdfFindIdx = -1; _pdfFindTerm = '';
+}
+
+function pdfFindRun(term) {
+  document.querySelectorAll('#preview-body .pdf-hl').forEach(el => {
+    el.classList.remove('pdf-hl', 'pdf-hl-cur');
+  });
+  _pdfFindMatches = [];
+  _pdfFindTerm = term.toLowerCase();
+  if (!term) { _pdfFindUpdateCount(); return; }
+
+  document.querySelectorAll('#preview-body .textLayer span').forEach(span => {
+    if (span.textContent.toLowerCase().includes(_pdfFindTerm)) {
+      span.classList.add('pdf-hl');
+      _pdfFindMatches.push(span);
+    }
+  });
+
+  _pdfFindIdx = _pdfFindMatches.length > 0 ? 0 : -1;
+  _pdfFindGoto(_pdfFindIdx);
+}
+
+function pdfFindNext() {
+  if (!_pdfFindMatches.length) return;
+  _pdfFindIdx = (_pdfFindIdx + 1) % _pdfFindMatches.length;
+  _pdfFindGoto(_pdfFindIdx);
+}
+
+function pdfFindPrev() {
+  if (!_pdfFindMatches.length) return;
+  _pdfFindIdx = (_pdfFindIdx - 1 + _pdfFindMatches.length) % _pdfFindMatches.length;
+  _pdfFindGoto(_pdfFindIdx);
+}
+
+function _pdfFindGoto(idx) {
+  document.querySelectorAll('#preview-body .pdf-hl-cur').forEach(el => el.classList.remove('pdf-hl-cur'));
+  if (idx >= 0 && _pdfFindMatches[idx]) {
+    _pdfFindMatches[idx].classList.add('pdf-hl-cur');
+    _pdfFindMatches[idx].scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }
+  _pdfFindUpdateCount();
+}
+
+function _pdfFindUpdateCount() {
+  const el = document.getElementById('pdf-find-count');
+  if (!el) return;
+  if (!_pdfFindTerm) { el.textContent = ''; return; }
+  if (_pdfFindMatches.length === 0) {
+    el.textContent = 'No matches'; el.style.color = 'var(--red)';
+  } else {
+    el.textContent = `${_pdfFindIdx + 1} / ${_pdfFindMatches.length}`; el.style.color = 'var(--text3)';
+  }
+}
+
 let _isFullscreen = false;
 
 function togglePreviewFullscreen() {
@@ -2982,7 +3997,7 @@ function toggleSelectionMode() {
   } else {
     btn.style.color = 'var(--text3)';
     btn.style.borderColor = 'var(--border)';
-    btn.textContent = 'Auswählen';
+    btn.textContent = 'Select';
     document.querySelectorAll('input[name="file"]').forEach(cb => cb.checked = false);
     toolbar.classList.remove('visible');
     if (bulkRow) bulkRow.style.display = 'flex';
@@ -3002,53 +4017,104 @@ function getSelectedFiles() {
 // ═══════════════════════════════════════════════════════════════════════════
 // Info tab
 // ═══════════════════════════════════════════════════════════════════════════
+let _customInfoFields = []; // [{label, value}]
+
 async function loadInfo() {
   const el = document.getElementById('info-body');
-  el.innerHTML = '<div style="color:var(--text3);font-size:13px;padding:16px">Lade Kursinfos…</div>';
+  el.innerHTML = '<div style="color:var(--text3);font-size:13px;padding:16px">Loading…</div>';
 
   const course = allCourses.find(c => c.path === activeCourse);
   let info = {};
-  try {
-    info = await fetch(`/api/course-info/${enc(activeCourse)}`).then(r => r.json());
-  } catch(_) {}
+  try { info = await fetch(`/api/course-info/${enc(activeCourse)}`).then(r => r.json()); } catch(_) {}
+  try { _customInfoFields = await fetch(`/api/custom-info/${enc(activeCourse)}`).then(r => r.json()); } catch(_) { _customInfoFields = []; }
 
-  const noInfo = !info || !Object.values(info).some(v => v && (Array.isArray(v) ? v.length : true));
+  _renderInfo(course, info);
+}
 
-  if (noInfo) {
-    el.innerHTML = `
-      <div class="info-card">
-        <div class="info-title">${esc(course?.name || activeCourse.split('/').pop())}</div>
-        <div class="info-subtitle" style="margin-top:8px;color:var(--text3)">
-          Keine Kursinfos gespeichert. Führe einen Sync aus um Infos von Stud.IP zu laden.
-        </div>
-      </div>`;
-    return;
-  }
-
+function _renderInfo(course, info) {
+  const el = document.getElementById('info-body');
   const row = (label, value) => value
-    ? `<div class="info-label">${label}</div><div class="info-value">${esc(String(value))}</div>`
+    ? `<div class="info-label">${esc(label)}</div><div class="info-value">${esc(String(value))}</div>`
     : '';
+  const lecturers = Array.isArray(info?.lecturers) ? info.lecturers.join(', ') : (info?.lecturers || '');
+  const hasScraped = info && Object.values(info).some(v => v && (Array.isArray(v) ? v.length : true));
 
-  const lecturers = Array.isArray(info.lecturers) ? info.lecturers.join(', ') : (info.lecturers || '');
-
-  el.innerHTML = `
+  const scrapedCard = hasScraped ? `
     <div class="info-card">
       <div class="info-title">${esc(info.title || course?.name || activeCourse.split('/').pop())}</div>
       ${info.subtitle ? `<div class="info-subtitle">${esc(info.subtitle)}</div>` : ''}
       <div class="info-grid">
-        ${row('Dozent/-in', lecturers)}
-        ${row('Typ', info.type)}
+        ${row('Lecturer', lecturers)}
+        ${row('Type', info.type)}
         ${row('Semester', info.semester)}
         ${row('ECTS', info.ects)}
         ${row('SWS', info.sws)}
-        ${row('Teilnehmer', info.participants)}
-        ${row('Ort', info.location)}
-        ${row('Veranst.-Nr.', info.course_no)}
-        ${row('Einrichtung', info.institution)}
-        ${row('Sprache', info.language)}
+        ${row('Participants', info.participants)}
+        ${row('Location', info.location)}
+        ${row('Course no.', info.course_no)}
+        ${row('Institution', info.institution)}
+        ${row('Language', info.language)}
       </div>
       ${info.description ? `<div class="info-desc">${esc(info.description)}</div>` : ''}
+    </div>` : '';
+
+  el.innerHTML = scrapedCard + `
+    <div class="info-card" id="custom-info-card">
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text3);margin-bottom:12px">Course details</div>
+      <div id="custom-info-rows"></div>
+      <button onclick="customInfoAddRow()" style="margin-top:8px;background:none;border:1px dashed var(--border2);border-radius:6px;padding:4px 12px;font-size:12px;color:var(--text3);cursor:pointer;transition:border-color .15s,color .15s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text3)'">+ Add field</button>
     </div>`;
+
+  _renderCustomRows();
+}
+
+function _renderCustomRows() {
+  const wrap = document.getElementById('custom-info-rows');
+  if (!wrap) return;
+  wrap.innerHTML = _customInfoFields.map((f, i) => `
+    <div class="custom-info-row">
+      <input type="text" value="${esc(f.label)}" placeholder="Category"
+        oninput="_customInfoEdit(${i},'label',this.value)" onblur="customInfoSave()">
+      <textarea placeholder="Content" rows="1"
+        oninput="_customInfoEdit(${i},'value',this.value);this.style.height='auto';this.style.height=this.scrollHeight+'px';customInfoSave()"
+      >${esc(f.value)}</textarea>
+      <button class="custom-info-del" onclick="customInfoDelRow(${i})" title="Remove">✕</button>
+    </div>`).join('');
+  // Auto-size textareas
+  wrap.querySelectorAll('textarea').forEach(ta => {
+    ta.style.height = 'auto';
+    ta.style.height = ta.scrollHeight + 'px';
+  });
+}
+
+function _customInfoEdit(i, key, val) {
+  if (_customInfoFields[i]) _customInfoFields[i][key] = val;
+}
+
+function customInfoAddRow() {
+  _customInfoFields.push({ label: '', value: '' });
+  _renderCustomRows();
+  // Focus the new label input
+  const rows = document.querySelectorAll('.custom-info-row input');
+  if (rows.length) rows[rows.length - 1].focus();
+}
+
+function customInfoDelRow(i) {
+  _customInfoFields.splice(i, 1);
+  _renderCustomRows();
+  customInfoSave();
+}
+
+let _customInfoSaveTimer = null;
+function customInfoSave() {
+  clearTimeout(_customInfoSaveTimer);
+  _customInfoSaveTimer = setTimeout(async () => {
+    await fetch(`/api/custom-info/${enc(activeCourse)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(_customInfoFields)
+    });
+  }, 600);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3091,9 +4157,9 @@ async function loadSummary(filename = null) {
     el.innerHTML = `
       <div class="empty-state">
         <div class="icon">📄</div>
-        <h3>Keine Zusammenfassung</h3>
-        <p>Gehe zu "Dateien", wähle Dateien aus und klicke "Zusammenfassen"</p>
-        <button class="tbtn btn-blue" onclick="switchTab('files')">Zu Dateien →</button>
+        <h3>No summary yet</h3>
+        <p>Go to "Files", select files and click "Summarize"</p>
+        <button class="tbtn btn-blue" onclick="switchTab('files')">Go to Files →</button>
       </div>`;
   }
 }
@@ -3103,12 +4169,12 @@ function _updateSummarizeBtn() {
   const btn = document.querySelector('[onclick="generateSummary(false)"]');
   if (!btn) return;
   if (course?.has_summary) {
-    btn.textContent = '→ Zur Zusammenfassung';
+    btn.textContent = '→ View summary';
     btn.className = 'tbtn btn-gray';
     btn.style.width = '100%';
     btn.onclick = () => switchTab('summary');
   } else {
-    btn.textContent = 'Zusammenfassen';
+    btn.textContent = 'Summarize';
     btn.className = 'tbtn btn-blue';
     btn.style.width = '100%';
     btn.onclick = () => generateSummary(false);
@@ -3119,14 +4185,14 @@ async function generateSummary(force, newFile = false) {
   const course = allCourses.find(c => c.path === activeCourse);
   // "Zusammenfassen" (force=false, newFile=false) with existing summary → do nothing
   if (!force && !newFile && course?.has_summary) {
-    toast('Zusammenfassung bereits vorhanden — nutze "➕ Weitere" oder "↺ Überschreiben".', '');
+    toast('Summary already exists — use "➕ Create another" or "↺ Overwrite".', '');
     return;
   }
   const files = getSelectedFiles();
   const limit = parseInt(document.getElementById('limit-input').value) || 3;
   const lang  = localStorage.getItem('summary_lang') || 'en';
   setLoading(true);
-  logShow(`Generiere Zusammenfassung für "${activeCourse}"…\n`);
+  logShow(`Generating summary for "${activeCourse}"…\n`);
 
   const res  = await fetch('/api/summarize', {
     method: 'POST',
@@ -3138,51 +4204,77 @@ async function generateSummary(force, newFile = false) {
   setLoading(false);
 
   if (data.success) {
-    logAppend('\n✅ Fertig!');
-    courseTree = await fetch('/api/courses').then(r => r.json());
+    logAppend('\n✅ Done!');
+    courseTree = await _fetchCourses();
     allCourses = flattenTree(courseTree);
     filterAndRenderSidebar();
     _updateSummarizeBtn();
     switchTab('summary');
-    toast('Zusammenfassung erstellt!', 'ok');
+    toast('Summary created!', 'ok');
   } else {
-    toast('Fehler beim Erstellen.', 'err');
+    // Show specific, actionable error messages
+    const log = (data.log || '').toLowerCase();
+    if (log.includes('anthropic_api_key missing') || log.includes('api_key missing')) {
+      logAppend(_setupErrorMsg('no_key'));
+    } else if (log.includes('ungültig') || log.includes('authenticationerror') || log.includes('invalid') && log.includes('key')) {
+      logAppend(_setupErrorMsg('bad_key'));
+    } else if (log.includes('connection') || log.includes('verbindung')) {
+      logAppend(_setupErrorMsg('no_connection'));
+    }
+    toast('Fehler beim Erstellen der Zusammenfassung.', 'err');
   }
 }
 
-async function runBulkSummarize() {
-  const lang = localStorage.getItem('summary_lang') || 'en';
-  const btn = document.querySelector('[onclick="runBulkSummarize()"]');
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Läuft…'; }
-  logShow('Starte Zusammenfassung aller Kurse…\n');
-  const res  = await fetch('/api/summarize-all', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ lang })
-  });
-  const data = await res.json();
-  logAppend(data.log || '');
-  if (data.success) {
-    logAppend('\n✅ Fertig!');
-    courseTree = await fetch('/api/courses').then(r => r.json());
-    allCourses = flattenTree(courseTree);
-    filterAndRenderSidebar();
-    toast(`${data.done} Zusammenfassungen erstellt!`, 'ok');
-    // Re-render home to update pending count
-    const streak = await fetch('/api/streak').then(r => r.json()).catch(() => null);
-    renderHome(courseTree, null, streak);
-  } else {
-    toast('Fehler beim Zusammenfassen.', 'err');
-  }
-  if (btn) { btn.disabled = false; }
+function _setupErrorMsg(type) {
+  const msgs = {
+    no_key: `
+
+╔══════════════════════════════════════════════════════════════╗
+  ❌  Kein API-Key konfiguriert
+══════════════════════════════════════════════════════════════════
+  Die KI-Zusammenfassung benötigt einen Anthropic API-Key.
+
+  So richtest du ihn ein:
+  1. Öffne die Datei ".env" im Projektordner (z. B. mit dem
+     Editor oder VS Code)
+  2. Trage deinen Key in diese Zeile ein:
+        ANTHROPIC_API_KEY=sk-ant-dein-key-hier
+
+  Noch keinen Key?
+  → https://console.anthropic.com  →  "Get API keys"
+  (kostenloser Testkredit inklusive, keine Kreditkarte nötig)
+╚══════════════════════════════════════════════════════════════╝`,
+    bad_key: `
+
+╔══════════════════════════════════════════════════════════════╗
+  ❌  API-Key ungültig oder abgelaufen
+══════════════════════════════════════════════════════════════════
+  Der in .env eingetragene ANTHROPIC_API_KEY wurde abgelehnt.
+
+  Prüfe folgendes:
+  1. Öffne .env und kontrolliere, ob der Key korrekt kopiert
+     wurde (kein Leerzeichen, vollständig, beginnt mit sk-ant-)
+  2. Prüfe auf https://console.anthropic.com ob der Key noch
+     aktiv ist und Guthaben vorhanden ist
+╚══════════════════════════════════════════════════════════════╝`,
+    no_connection: `
+
+╔══════════════════════════════════════════════════════════════╗
+  ❌  Keine Verbindung zur Anthropic API
+══════════════════════════════════════════════════════════════════
+  Prüfe deine Internetverbindung und versuche es erneut.
+╚══════════════════════════════════════════════════════════════╝`,
+  };
+  return msgs[type] || '';
 }
+
 
 async function copyToClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
-    toast('In Zwischenablage kopiert!', 'ok');
+    toast('Copied to clipboard!', 'ok');
   } catch {
-    toast('Kopieren nicht möglich.', 'err');
+    toast('Copy not possible.', 'err');
   }
 }
 
@@ -3214,25 +4306,6 @@ async function loadFlashcards() {
 // ═══════════════════════════════════════════════════════════════════════════
 // Flashcards — global (all courses)
 // ═══════════════════════════════════════════════════════════════════════════
-async function startGlobalLearn() {
-  const cards = await fetch('/api/all-flashcards').then(r => r.json());
-  if (!cards.length) {
-    toast('Noch keine Lernkarten vorhanden. Erstelle zuerst Zusammenfassungen.', 'err');
-    return;
-  }
-
-  // Load all progress
-  const prog = {};
-  flashState = { cards: shuffleArr([...cards]), index: 0, revealed: false, progress: prog, timerStart: Date.now(), timerInterval: null, isGlobal: true };
-
-  activeCourse = null;
-  document.getElementById('tabs').style.display = 'none';
-  document.getElementById('course-title-bar').style.display = 'none';
-  filterAndRenderSidebar();
-  showPanel('learn');
-  startTimer();
-  renderFlash();
-}
 
 function shuffleArr(arr) {
   for (let i = arr.length - 1; i > 0; i--) {
@@ -3278,13 +4351,13 @@ function renderFlash() {
       <div class="flash-layout">
         <div class="flash-done" style="display:flex">
           <div class="big-icon">🎉</div>
-          <h2>Alle Karten durch!</h2>
-          <p>${known} gewusst · ${unknown} nicht gewusst · ${cards.length} gesamt · ⏱ ${elapsed}</p>
+          <h2>All cards done!</h2>
+          <p>${known} known · ${unknown} unknown · ${cards.length} total · ⏱ ${elapsed}</p>
           <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;justify-content:center">
-            <button class="tbtn btn-gray" onclick="restartFlash()">Nochmal</button>
-            <button class="tbtn btn-blue" onclick="shuffleAndRestart()">🔀 Zufällig nochmal</button>
-            ${unknown > 0 ? `<button class="tbtn btn-red" onclick="restartFlashUnknown()">Nur falsche (${unknown})</button>` : ''}
-            ${!isGlobal ? `<button class="tbtn btn-gray" onclick="resetProgress()">Fortschritt zurücksetzen</button>` : ''}
+            <button class="tbtn btn-gray" onclick="restartFlash()">Again</button>
+            <button class="tbtn btn-blue" onclick="shuffleAndRestart()">🔀 Shuffle</button>
+            ${unknown > 0 ? `<button class="tbtn btn-red" onclick="restartFlashUnknown()">Wrong only (${unknown})</button>` : ''}
+            ${!isGlobal ? `<button class="tbtn btn-gray" onclick="resetProgress()">Reset progress</button>` : ''}
           </div>
         </div>
       </div>`;
@@ -3296,7 +4369,7 @@ function renderFlash() {
   document.getElementById('learn-body').innerHTML = `
     <div class="flash-layout">
       <div class="flash-header">
-        <span class="flash-header-title">${isGlobal ? '🌍 Alle Kurse' : esc(activeCourse || '')}</span>
+        <span class="flash-header-title">${isGlobal ? '🌍 All courses' : esc(activeCourse || '')}</span>
         ${!isGlobal ? `<button class="tbtn btn-gray" style="font-size:11px;padding:4px 10px" onclick="resetProgress()">↺ Reset</button>` : ''}
         <button class="tbtn btn-gray" style="font-size:11px;padding:4px 10px" onclick="shuffleAndRestart()">🔀 Shuffle</button>
       </div>
@@ -3316,10 +4389,10 @@ function renderFlash() {
         <div class="flash-answer" id="flash-answer">${esc(card.a)}</div>
       </div>
       <div class="flash-btns" id="flash-btns">
-        <button class="flash-btn fb-reveal" onclick="revealFlash()">Antwort zeigen</button>
+        <button class="flash-btn fb-reveal" onclick="revealFlash()">Show answer</button>
       </div>
       <div class="flash-kbd-hint">
-        <kbd>Space</kbd> Antwort &nbsp; <kbd>→</kbd>/<kbd>k</kbd> Gewusst &nbsp; <kbd>←</kbd>/<kbd>u</kbd> Nicht gewusst &nbsp; <kbd>Esc</kbd> Übersicht
+        <kbd>Space</kbd> Answer &nbsp; <kbd>→</kbd>/<kbd>k</kbd> Known &nbsp; <kbd>←</kbd>/<kbd>u</kbd> Unknown &nbsp; <kbd>Esc</kbd> Home
       </div>
     </div>`;
 
@@ -3331,8 +4404,8 @@ function renderFlash() {
 function revealFlash() {
   document.getElementById('flash-answer').style.display = 'block';
   document.getElementById('flash-btns').innerHTML = `
-    <button class="flash-btn fb-unknown" onclick="rateFlash('unknown')">✗ Nicht gewusst</button>
-    <button class="flash-btn fb-known"   onclick="rateFlash('known')">✓ Gewusst</button>`;
+    <button class="flash-btn fb-unknown" onclick="rateFlash('unknown')">✗ Unknown</button>
+    <button class="flash-btn fb-known"   onclick="rateFlash('known')">✓ Known</button>`;
   flashState.revealed = true;
 }
 
@@ -3391,14 +4464,14 @@ function restartFlashUnknown() {
 
 function resetProgress() {
   showConfirm(
-    'Lernfortschritt zurücksetzen?',
-    `Alle Fortschrittsdaten für "${activeCourse}" werden gelöscht.`,
+    'Reset progress?',
+    `All progress data for "${activeCourse}" will be deleted.`,
     async () => {
       await fetch(`/api/progress-reset/${enc(activeCourse)}`, { method: 'POST' });
       flashState.progress = {};
       allCourses = allCourses.map(c => c.name === activeCourse ? {...c, progress: {total: 0, known: 0}} : c);
       filterAndRenderSidebar();
-      toast('Fortschritt zurückgesetzt', 'ok');
+      toast('Progress reset', 'ok');
       loadFlashcards();
     }
   );
@@ -3427,6 +4500,13 @@ document.addEventListener('keydown', e => {
 
   if (e.key === 'f' && e.target.tagName !== 'INPUT' && e.target.tagName !== 'TEXTAREA') {
     if (document.getElementById('fullscreen-btn')) { togglePreviewFullscreen(); return; }
+  }
+
+  // Ctrl/Cmd+F → PDF find bar (when PDF is active)
+  if ((e.ctrlKey || e.metaKey) && e.key === 'f' && _pdfDoc) {
+    e.preventDefault();
+    togglePdfFind();
+    return;
   }
 
   // Ctrl/Cmd+K → command palette
@@ -3515,7 +4595,16 @@ function toggleFileList() {
 function toggleFileNotes() {
   _fileNotesOpen = !_fileNotesOpen;
   const col = document.getElementById('files-notes-col');
+  if (_fileNotesOpen) {
+    // Restore saved width (if user had resized it) before re-opening
+    const saved = localStorage.getItem('notes_col_width');
+    if (saved) col.style.width = saved + 'px';
+  } else {
+    // Clear inline width so the CSS 'width: 0' (no .open class) can take effect
+    col.style.width = '';
+  }
   col.classList.toggle('open', _fileNotesOpen);
+  document.getElementById('divider-notes').style.display = _fileNotesOpen ? '' : 'none';
   if (_fileNotesOpen && activePreviewFile) {
     _loadFileNote(activePreviewFile);
   }
@@ -3523,6 +4612,8 @@ function toggleFileNotes() {
   const btn = document.getElementById('fnotes-toggle-btn');
   if (btn) btn.style.color = _fileNotesOpen ? 'var(--blue)' : 'var(--text3)';
 }
+
+const FNOTES_DEFAULT = '## Fragen\n\n- [ ] \n\n## Notizen\n\n';
 
 // Called whenever a new file is selected in the preview
 async function _loadFileNote(filename) {
@@ -3535,8 +4626,67 @@ async function _loadFileNote(filename) {
   document.getElementById('fnotes-saved').textContent = '';
   try {
     const data = await fetch(`/api/file-note/${enc(activeCourse)}/${enc(filename)}`).then(r => r.json());
-    editor.value = data.text || '';
-  } catch(_) {}
+    editor.value = data.text || FNOTES_DEFAULT;
+  } catch(_) { editor.value = FNOTES_DEFAULT; }
+  if (_fnotesPreviewMode) _renderFnotes();
+}
+
+let _fnotesPreviewMode = false;
+
+function toggleFnotesMode() {
+  _fnotesPreviewMode = !_fnotesPreviewMode;
+  const editor   = document.getElementById('fnotes-editor');
+  const rendered = document.getElementById('fnotes-rendered');
+  const btn      = document.getElementById('fnotes-mode-btn');
+  if (_fnotesPreviewMode) {
+    _renderFnotes();
+    editor.style.display   = 'none';
+    rendered.style.display = 'block';
+    btn.title = 'Bearbeiten';
+    btn.textContent = '✏️';
+  } else {
+    editor.style.display   = 'block';
+    rendered.style.display = 'none';
+    btn.title = 'Vorschau';
+    btn.textContent = '👁';
+  }
+}
+
+async function _renderFnotes() {
+  const md = document.getElementById('fnotes-editor').value;
+  const rendered = document.getElementById('fnotes-rendered');
+  try {
+    const data = await fetch('/api/notes-preview', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ text: md })
+    }).then(r => r.json());
+    rendered.innerHTML = data.html || '';
+    // Enable and wire up task-list checkboxes (markdown2 renders them as disabled)
+    rendered.querySelectorAll('input.task-list-item-checkbox').forEach((cb, i) => {
+      cb.removeAttribute('disabled');
+      cb.addEventListener('change', () => _toggleFnoteCheckbox(i, cb.checked));
+    });
+  } catch(_) {
+    rendered.innerHTML = '<pre style="color:var(--text3);white-space:pre-wrap">' + md.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</pre>';
+  }
+}
+
+function _toggleFnoteCheckbox(index, checked) {
+  const editor = document.getElementById('fnotes-editor');
+  let md = editor.value;
+  let count = 0;
+  md = md.replace(/^(\s*-\s*\[)([ x])(\])/gm, (match, pre, state, post) => {
+    if (count === index) {
+      count++;
+      return pre + (checked ? 'x' : ' ') + post;
+    }
+    count++;
+    return match;
+  });
+  editor.value = md;
+  clearTimeout(_fileNotesSaveTimer);
+  _fileNotesSaveTimer = setTimeout(_saveFileNote, 600);
 }
 
 async function _saveFileNote() {
@@ -3560,9 +4710,37 @@ function downloadFileNote() {
 
 // Auto-save on input (debounced)
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('fnotes-editor').addEventListener('input', () => {
+  const ed = document.getElementById('fnotes-editor');
+  ed.addEventListener('input', () => {
     clearTimeout(_fileNotesSaveTimer);
     _fileNotesSaveTimer = setTimeout(_saveFileNote, 600);
+  });
+  // Enter on list lines → continue list; empty list line → break out
+  ed.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    const start = ed.selectionStart;
+    const lineStart = ed.value.lastIndexOf('\n', start - 1) + 1;
+    const line = ed.value.slice(lineStart, start);
+    let insert = null;
+    const cbMatch  = line.match(/^(\s*)- \[[ x]\] (.*)/);
+    const ulMatch  = line.match(/^(\s*)([-*+]) (.*)/);
+    const olMatch  = line.match(/^(\s*)(\d+)\. (.*)/);
+    if (cbMatch) {
+      // checkbox: empty item → break out, else new checkbox
+      insert = cbMatch[2].trim() === '' ? '\n' : '\n' + cbMatch[1] + '- [ ] ';
+    } else if (ulMatch) {
+      insert = ulMatch[3].trim() === '' ? '\n' : '\n' + ulMatch[1] + ulMatch[2] + ' ';
+    } else if (olMatch) {
+      insert = olMatch[3].trim() === '' ? '\n' : '\n' + olMatch[1] + (parseInt(olMatch[2]) + 1) + '. ';
+    }
+    if (insert !== null) {
+      e.preventDefault();
+      ed.value = ed.value.slice(0, start) + insert + ed.value.slice(ed.selectionEnd);
+      const pos = start + insert.length;
+      ed.selectionStart = ed.selectionEnd = pos;
+      clearTimeout(_fileNotesSaveTimer);
+      _fileNotesSaveTimer = setTimeout(_saveFileNote, 600);
+    }
   });
 });
 
@@ -3603,11 +4781,11 @@ let chatHistory = [];   // [{role, content}]
 let chatStreaming = false;
 
 const CHAT_SUGGESTIONS = [
-  'Was sind die wichtigsten Konzepte?',
-  'Erkläre den wichtigsten Begriff einfach.',
-  'Welche Prüfungsfragen könnten kommen?',
-  'Fasse das Wichtigste in 3 Stichpunkten zusammen.',
-  'Was hängt mit diesem Thema zusammen?',
+  'What are the most important concepts?',
+  'Explain the key term simply.',
+  'What exam questions might come up?',
+  'Summarize the most important points in 3 bullets.',
+  'What connects to this topic?',
 ];
 
 function loadChat() {
@@ -3621,8 +4799,8 @@ function loadChat() {
           <div class="chat-avatar">🤖</div>
           <div class="chat-bubble">
             ${hasSummary
-              ? `Hallo! Ich kenne die Zusammenfassung von <strong>${esc(activeCourse.split('/').pop())}</strong>. Was möchtest du wissen?`
-              : `Für diesen Kurs gibt es noch keine Zusammenfassung. Erstelle zuerst eine unter „Dateien", damit ich dir gezielt helfen kann.`}
+              ? `Hi! I know the summary of <strong>${esc(activeCourse.split('/').pop())}</strong>. What would you like to know?`
+              : `No summary exists for this course yet. Create one under "Files" first so I can help you.`}
           </div>
         </div>
       </div>
@@ -3630,7 +4808,7 @@ function loadChat() {
         ${CHAT_SUGGESTIONS.map(s => `<button class="chat-suggestion" onclick="sendSuggestion('${esc(s)}')">${esc(s)}</button>`).join('')}
       </div>` : ''}
       <div class="chat-input-row">
-        <textarea id="chat-input" placeholder="Frage stellen… (Enter zum Senden, Shift+Enter für Zeilenumbruch)"
+        <textarea id="chat-input" placeholder="Ask a question… (Enter to send, Shift+Enter for newline)"
           ${hasSummary ? '' : 'disabled'}
           onkeydown="handleChatKey(event)" oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px'"></textarea>
         <button class="chat-input-btn" id="chat-send-btn" onclick="sendChat()" ${hasSummary ? '' : 'disabled'}>Senden</button>
@@ -3717,7 +4895,7 @@ async function sendChat() {
     chatHistory.push({ role: 'assistant', content: fullAnswer });
   } catch (err) {
     const bubbleEl = document.getElementById(aiId);
-    if (bubbleEl) { bubbleEl.classList.remove('streaming'); bubbleEl.textContent = 'Fehler: ' + err.message; }
+    if (bubbleEl) { bubbleEl.classList.remove('streaming'); bubbleEl.textContent = 'Error: ' + err.message; }
   }
 
   chatStreaming = false;
@@ -3741,7 +4919,7 @@ function appendChatMsg(role, text) {
 document.addEventListener('input', e => {
   if (e.target.id === 'notes-editor') {
     const el = document.getElementById('notes-saved');
-    el.textContent = '● Ungespeichert';
+    el.textContent = '● Unsaved';
     el.style.color = 'var(--orange)';
     el.style.display = 'inline';
     clearTimeout(notesSaveTimer);
@@ -3763,7 +4941,7 @@ function handleGlobalSearch(e) {
 function _renderSearchResults(results, q, el, showFileSearchBtn = true) {
   const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const SOURCE_LABEL = {
-    summary: 'Zusammenfassung', notes: 'Notizen', both: 'Zusammenfassung + Notizen', file: 'Dateiinhalt',
+    summary: 'Summary', notes: 'Notes', both: 'Summary + Notes', file: 'File content',
   };
   const SOURCE_CLASS = { summary: 'summary', notes: 'notes', both: 'both', file: 'summary' };
   const rows = results.map(r => {
@@ -3774,21 +4952,21 @@ function _renderSearchResults(results, q, el, showFileSearchBtn = true) {
       <div class="search-result" data-course="${esc(r.course)}" onclick="selectCourseFromEl(this);switchTab('${tab}')">
         <div class="search-result-course">
           ${esc(r.name || r.course)}${fileTag}
-          ${r.count > 1 ? `<span class="search-result-count">${r.count} Treffer</span>` : ''}
+          ${r.count > 1 ? `<span class="search-result-count">${r.count} matches</span>` : ''}
           ${r.source ? `<span class="search-source search-source-${SOURCE_CLASS[r.source]||'summary'}">${SOURCE_LABEL[r.source]||r.source}</span>` : ''}
         </div>
         <div class="search-result-snippet">…${snippet}…</div>
       </div>`;
   }).join('');
   const fileBtn = showFileSearchBtn
-    ? `<button class="tbtn btn-gray" style="font-size:11px;padding:4px 10px" onclick="doFileSearch(${JSON.stringify(q)})">📄 In Dateien suchen</button>`
-    : `<span style="font-size:11px;color:var(--text3)">inkl. Dateiinhalte</span>`;
+    ? `<button class="tbtn btn-gray" style="font-size:11px;padding:4px 10px" onclick="doFileSearch(${JSON.stringify(q)})">📄 Search in files</button>`
+    : `<span style="font-size:11px;color:var(--text3)">incl. file contents</span>`;
   el.innerHTML = `
     <div class="search-results-header" style="display:flex;align-items:center;gap:10px">
-      <span>${results.length} Treffer für „${esc(q)}"</span>
+      <span>${results.length} result${results.length !== 1 ? 's' : ''} for „${esc(q)}"</span>
       <div style="flex:1"></div>
       ${fileBtn}
-    </div>${rows || `<div class="search-empty">Keine Treffer in Zusammenfassungen/Notizen</div>`}`;
+    </div>${rows || `<div class="search-empty">No results in summaries/notes</div>`}`;
 }
 
 async function doSearch(q) {
@@ -3802,7 +4980,7 @@ async function doSearch(q) {
 
 async function doFileSearch(q) {
   const el = document.getElementById('search-results-body');
-  el.innerHTML = '<div class="search-empty">Durchsuche Dateiinhalte (kann einen Moment dauern)…</div>';
+  el.innerHTML = '<div class="search-empty">Searching file contents (may take a moment)…</div>';
   const [sumResults, fileResults] = await Promise.all([
     fetch(`/api/search?q=${encodeURIComponent(q)}`).then(r => r.json()),
     fetch(`/api/search-files?q=${encodeURIComponent(q)}`).then(r => r.json()),
@@ -3817,20 +4995,20 @@ async function doFileSearch(q) {
 // ═══════════════════════════════════════════════════════════════════════════
 async function runScraper() {
   setLoading(true);
-  logShow('Lade neue Dateien von Stud.IP…\n');
+  logShow('Syncing new files from Stud.IP…\n');
   const res  = await fetch('/api/scrape', { method: 'POST' });
   const data = await res.json();
   logAppend(data.log || '');
   setLoading(false);
   if (data.success) {
-    logAppend('\n✅ Fertig!');
-    courseTree = await fetch('/api/courses').then(r => r.json());
+    logAppend('\n✅ Done!');
+    courseTree = await _fetchCourses();
     allCourses = flattenTree(courseTree);
     filterAndRenderSidebar();
     if (activeCourse) loadFiles();
-    toast('Dateien aktualisiert!', 'ok');
+    toast('Files updated!', 'ok');
   } else {
-    toast('Fehler beim Scraping.', 'err');
+    toast('Scraping error.', 'err');
   }
 }
 
@@ -3850,14 +5028,14 @@ async function syncCourse() {
   setLoading(false);
   if (btn) { btn.disabled = false; btn.textContent = '↓ Sync'; }
   if (data.success) {
-    logAppend('\n✅ Fertig!');
-    courseTree = await fetch('/api/courses').then(r => r.json());
+    logAppend('\n✅ Done!');
+    courseTree = await _fetchCourses();
     allCourses = flattenTree(courseTree);
     filterAndRenderSidebar();
     loadFiles();
-    toast('Kurs aktualisiert!', 'ok');
+    toast('Course updated!', 'ok');
   } else {
-    toast(data.log?.includes('not in registry') ? 'Zuerst vollen Sync ausführen.' : 'Sync fehlgeschlagen.', 'err');
+    toast(data.log?.includes('not in registry') ? 'Run a full sync first.' : 'Sync failed.', 'err');
   }
 }
 
@@ -3890,28 +5068,34 @@ function initResizeDividers() {
   if (savedSidebar) document.getElementById('sidebar').style.width = savedSidebar + 'px';
   const savedFilesCol = localStorage.getItem('files_col_width');
   if (savedFilesCol) document.getElementById('files-list-col').style.width = savedFilesCol + 'px';
+  const savedNotesCol = localStorage.getItem('notes_col_width');
+  if (savedNotesCol) document.getElementById('files-notes-col').style.width = savedNotesCol + 'px';
 
-  setupColResize(document.getElementById('divider-sidebar'),  document.getElementById('sidebar'),       140, 480, 'sidebar_width');
+  setupColResize(document.getElementById('divider-sidebar'),  document.getElementById('sidebar'),        140, 480, 'sidebar_width');
   setupColResize(document.getElementById('divider-files'),    document.getElementById('files-list-col'), 120, 500, 'files_col_width');
+  setupColResize(document.getElementById('divider-notes'),    document.getElementById('files-notes-col'), 180, 600, 'notes_col_width', true);
 }
 
-function setupColResize(divider, targetEl, minW, maxW, storageKey) {
+function setupColResize(divider, targetEl, minW, maxW, storageKey, reverse = false) {
   let startX, startW;
   divider.addEventListener('mousedown', e => {
     e.preventDefault();
     startX = e.clientX;
     startW = targetEl.getBoundingClientRect().width;
     divider.classList.add('dragging');
+    targetEl.style.transition = 'none'; // disable CSS transition while dragging
     // Prevent iframes from swallowing mouse events during drag
     document.querySelectorAll('iframe').forEach(f => f.classList.add('no-pointer'));
 
     function onMove(e) {
-      const newW = Math.min(maxW, Math.max(minW, startW + e.clientX - startX));
+      const delta = reverse ? -(e.clientX - startX) : (e.clientX - startX);
+      const newW = Math.min(maxW, Math.max(minW, startW + delta));
       targetEl.style.width = newW + 'px';
       if (storageKey === 'sidebar_width') targetEl.style.minWidth = newW + 'px';
     }
     function onUp() {
       divider.classList.remove('dragging');
+      targetEl.style.transition = ''; // restore CSS transition
       document.querySelectorAll('iframe').forEach(f => f.classList.remove('no-pointer'));
       localStorage.setItem(storageKey, parseInt(targetEl.style.width));
       document.removeEventListener('mousemove', onMove);
@@ -4001,24 +5185,24 @@ function _buildPaletteItems(q) {
   const ql = q.toLowerCase();
 
   const actions = [
-    { icon: '🏠', label: 'Zur Übersicht',         meta: 'Navigation',   fn: () => goHome() },
-    { icon: '↓',  label: 'Neue Dateien laden',     meta: 'Sync',         fn: () => runScraper() },
-    { icon: '🧠', label: 'Alle Karten lernen',     meta: 'Lernen',       fn: () => startGlobalLearn() },
-    { icon: '⌨️', label: 'Tastenkürzel anzeigen',  meta: 'Hilfe',        fn: () => showShortcuts() },
-    { icon: '🌙', label: 'Hell/Dunkel wechseln',   meta: 'Einstellungen',fn: () => toggleTheme() },
-    { icon: '🔍', label: 'In Zusammenfassungen suchen', meta: 'Suche',   fn: () => { document.getElementById('search-global').focus(); } },
+    { icon: '🏠', label: 'Go home',                 meta: 'Navigation',   fn: () => goHome() },
+    { icon: '↓',  label: 'Sync new files',          meta: 'Sync',         fn: () => runScraper() },
+    { icon: '🧠', label: 'Study all cards',         meta: 'Learn',        fn: () => startGlobalLearn() },
+    { icon: '⌨️', label: 'Show shortcuts',          meta: 'Help',         fn: () => showShortcuts() },
+    { icon: '🌙', label: 'Toggle light/dark',       meta: 'Settings',     fn: () => toggleTheme() },
+    { icon: '🔍', label: 'Search summaries',        meta: 'Search',       fn: () => { document.getElementById('search-global').focus(); } },
   ];
 
   if (activeCourse) {
     const cname = activeCourse.split('/').pop();
     actions.push(
-      { icon: '📁', label: `Dateien — ${cname}`,                meta: 'Tab',    fn: () => switchTab('files') },
-      { icon: '📄', label: `Zusammenfassung — ${cname}`,        meta: 'Tab',    fn: () => switchTab('summary') },
-      { icon: '🧠', label: `Lernen — ${cname}`,                 meta: 'Tab',    fn: () => switchTab('learn') },
-      { icon: '✏️', label: `Notizen — ${cname}`,                meta: 'Tab',    fn: () => switchTab('notes') },
-      { icon: '💬', label: `Fragen (KI) — ${cname}`,            meta: 'Tab',    fn: () => switchTab('chat') },
-      { icon: '✨', label: `Zusammenfassung erstellen — ${cname}`, meta: 'Aktion', fn: () => { switchTab('files'); setTimeout(() => generateSummary(false), 100); } },
-      { icon: '↓',  label: `Kurs synchronisieren — ${cname}`,   meta: 'Sync',   fn: () => syncCourse() },
+      { icon: '📁', label: `Files — ${cname}`,                   meta: 'Tab',    fn: () => switchTab('files') },
+      { icon: '📄', label: `Summary — ${cname}`,                 meta: 'Tab',    fn: () => switchTab('summary') },
+      { icon: '🧠', label: `Learn — ${cname}`,                   meta: 'Tab',    fn: () => switchTab('learn') },
+      { icon: '✏️', label: `Notes — ${cname}`,                   meta: 'Tab',    fn: () => switchTab('notes') },
+      { icon: '💬', label: `Chat — ${cname}`,                    meta: 'Tab',    fn: () => switchTab('chat') },
+      { icon: '✨', label: `Create summary — ${cname}`,          meta: 'Action', fn: () => { switchTab('files'); setTimeout(() => generateSummary(false), 100); } },
+      { icon: '↓',  label: `Sync course — ${cname}`,             meta: 'Sync',   fn: () => syncCourse() },
     );
   }
 
@@ -4171,8 +5355,8 @@ function updateSelectionToolbar() {
   const count  = document.querySelectorAll('input[name="file"]:checked').length;
   const countEl = document.getElementById('sel-count');
   const sumBtn  = document.getElementById('sel-summarize-btn');
-  if (countEl) countEl.textContent = `${count} Datei${count !== 1 ? 'en' : ''} ausgewählt`;
-  if (sumBtn)  sumBtn.textContent  = `Ausgewählte zusammenfassen (${count})`;
+  if (countEl) countEl.textContent = `${count} file${count !== 1 ? 's' : ''} selected`;
+  if (sumBtn)  sumBtn.textContent  = `Summarize selected (${count})`;
 }
 
 function markSelectedFilesRead(read) {
@@ -4246,7 +5430,7 @@ def api_file_meta(course_name):
 @app.route("/api/notes-preview", methods=["POST"])
 def api_notes_preview():
     text = request.json.get("text", "")
-    html = markdown2.markdown(text, extras=["fenced-code-blocks", "tables"])
+    html = markdown2.markdown(text, extras=["fenced-code-blocks", "tables", "task_list"])
     return jsonify({"html": html})
 
 @app.route("/")

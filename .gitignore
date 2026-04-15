@@ -3,4 +3,7 @@ __pycache__/
 *.pyc
 pipeline.log
 progress.json
+user_state.json
 debug_page.html
+courses.json
+debug_dump.py

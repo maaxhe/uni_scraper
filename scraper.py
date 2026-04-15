@@ -338,6 +338,7 @@ async def download_course_files(page: Page, course: dict, output_root: Path,
 
     await _api_download_folder(api, dest_dir, folder_id)
     _remove_duplicates(dest_dir)
+    (dest_dir / "_last_sync").write_text(str(int(__import__("time").time())))
 
 
 async def _api_download_folder(
