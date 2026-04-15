@@ -1,6 +1,8 @@
 # 📚 Stud.IP Dashboard
 
-Hi dear Coxis and other students using Stud.IP. I built this tool to automatically download all files from your signed-in courses on Stud.IP without you logging in every time and downloading each file manually.
+Hi dear Coxis and other students using Stud.IP :)
+
+I built this tool to automatically download all files from your signed-in courses on Stud.IP without you logging in every time and downloading each file manually.
 One button - and it's done! In this dashboard. Enjoy and use the extra time saved for a smile at the person in front of you :D (or even giving them a compliment).
 
 Wish you the best,
