@@ -2102,6 +2102,7 @@ function renderSidebar(tree) {
         <div class="citem-meta">
           <span>${c.file_count} Datei${c.file_count !== 1 ? 'en' : ''}</span>
           ${readCount > 0 && !allRead ? `<span style="color:var(--text3)">${readCount}/${c.file_count} gel.</span>` : ''}
+          ${c.new_files && sidebarSort === 'recent' ? `<span style="color:var(--blue);font-weight:600">+${c.new_files} neu</span>` : ''}
           ${c.has_summary ? `<span style="color:var(--green)">✓</span>` : ''}
           ${c.has_notes   ? `<span style="color:var(--purple)">📝</span>` : ''}
           ${lastStudied   ? `<span title="Zuletzt gelernt">🕐 ${lastStudied}</span>` : ''}

@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import sys
+from html.parser import HTMLParser
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -392,6 +393,86 @@ async def _api_download_folder(api, dest_dir: Path, folder_id: str, depth: int =
             log.warning("%s  Failed: %s — %s", indent, filename, exc)
 
 
+class _TextExtractor(HTMLParser):
+    """Strip all HTML tags and return plain text."""
+    def __init__(self):
+        super().__init__()
+        self._parts: list[str] = []
+        self._skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style"):
+            self._skip += 1
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style") and self._skip:
+            self._skip -= 1
+
+    def handle_data(self, data):
+        if not self._skip:
+            self._parts.append(data)
+
+    def text(self) -> str:
+        return re.sub(r'\s+', ' ', ''.join(self._parts)).strip()
+
+
+async def _fetch_details_page_description(api, cid: str) -> str:
+    """
+    Scrape the description from the Stud.IP course details HTML page.
+    Returns empty string if nothing useful found.
+    """
+    url = f"{STUDIP_BASE}/dispatch.php/course/details/?cid={cid}"
+    try:
+        resp = await api.get(url)
+        if resp.status != 200:
+            return ""
+        html = await resp.text()
+    except Exception:
+        return ""
+
+    # Strategy 1: look for a <section> whose header contains "Beschreibung"
+    # or a <div class="..."> following such a heading.
+    # Stud.IP 4/5 wraps content blocks like:
+    #   <section class="content-block"><header><h1>Beschreibung</h1></header>
+    #     <div class="content">...</div></section>
+    m = re.search(
+        r'Beschreibung\b.{0,300}?<(?:div|td)[^>]*class="[^"]*(?:content|desc|text)[^"]*"[^>]*>(.*?)</(?:div|td)>',
+        html, re.DOTALL | re.IGNORECASE,
+    )
+    if m:
+        ex = _TextExtractor()
+        ex.feed(m.group(1))
+        desc = ex.text()
+        if len(desc) > 10:
+            return desc
+
+    # Strategy 2: table row – label cell says "Beschreibung", next cell has value
+    m = re.search(
+        r'<td[^>]*>[\s\S]{0,50}?Beschreibung[\s\S]{0,50}?</td>\s*<td[^>]*>([\s\S]*?)</td>',
+        html, re.IGNORECASE,
+    )
+    if m:
+        ex = _TextExtractor()
+        ex.feed(m.group(1))
+        desc = ex.text()
+        if len(desc) > 10:
+            return desc
+
+    # Strategy 3: any <div> with id or class containing "description"
+    m = re.search(
+        r'<div[^>]+(?:id|class)="[^"]*description[^"]*"[^>]*>([\s\S]*?)</div>',
+        html, re.IGNORECASE,
+    )
+    if m:
+        ex = _TextExtractor()
+        ex.feed(m.group(1))
+        desc = ex.text()
+        if len(desc) > 10:
+            return desc
+
+    return ""
+
+
 async def _fetch_course_meta(api, cid: str) -> dict:
     """
     Fetch course metadata (title, description, instructors, type, …) from the StudIP REST API.
@@ -455,10 +536,15 @@ async def _fetch_course_meta(api, cid: str) -> dict:
     }
     type_label = type_labels.get(str(course_type), str(course_type)) if course_type else ""
 
+    # REST API often returns empty description — fall back to HTML details page
+    description = (data.get("description") or "").strip()
+    if not description:
+        description = await _fetch_details_page_description(api, cid)
+
     return {
         "title":       data.get("title") or data.get("name") or "",
         "subtitle":    data.get("subtitle") or "",
-        "description": (data.get("description") or "").strip(),
+        "description": description,
         "type":        type_label,
         "lecturers":   lecturers,
         "semester":    data.get("start_semester", {}).get("title", "") if isinstance(data.get("start_semester"), dict) else "",
