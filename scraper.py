@@ -339,12 +339,24 @@ async def download_course_files(page: Page, course: dict, output_root: Path,
     await _api_download_folder(api, dest_dir, folder_id)
 
 
-async def _api_download_folder(api, dest_dir: Path, folder_id: str, depth: int = 0) -> None:
+async def _api_download_folder(
+    api,
+    dest_dir: Path,
+    folder_id: str,
+    depth: int = 0,
+    seen_ids: set | None = None,
+) -> None:
     """
     Recursively download files using the Stud.IP REST API.
     GET /api.php/folder/<folder_id> returns subfolders and file_refs.
     GET /api.php/file/<file_id>/download streams the file.
+
+    seen_ids: shared set of already-downloaded file_ids for this course.
+              Prevents the same file from being written into multiple
+              subfolders when the API returns it in more than one place.
     """
+    if seen_ids is None:
+        seen_ids = set()
     if depth > 10:
         log.warning("Max folder depth reached.")
         return
@@ -366,7 +378,7 @@ async def _api_download_folder(api, dest_dir: Path, folder_id: str, depth: int =
         sub_dir = dest_dir / sub_name
         sub_dir.mkdir(parents=True, exist_ok=True)
         log.info("%s→ Folder: %s", indent, sub_name)
-        await _api_download_folder(api, sub_dir, sub_id, depth + 1)
+        await _api_download_folder(api, sub_dir, sub_id, depth + 1, seen_ids)
 
     # --- Files ---
     for file_ref in data.get("file_refs", []):
@@ -374,6 +386,12 @@ async def _api_download_folder(api, dest_dir: Path, folder_id: str, depth: int =
         filename = sanitize_dirname(file_ref.get("name", "")) or file_id
         if not file_id:
             continue
+
+        # Deduplicate across all folders in this course by file_id
+        if file_id in seen_ids:
+            log.info("%s⊘ Duplicate (already downloaded): %s", indent, filename)
+            continue
+        seen_ids.add(file_id)
 
         if already_exists(dest_dir, filename):
             log.info("%s✓ Already exists: %s", indent, filename)
@@ -384,6 +402,7 @@ async def _api_download_folder(api, dest_dir: Path, folder_id: str, depth: int =
             dl_resp = await api.get(f"{STUDIP_BASE}/api.php/file/{file_id}/download")
             if dl_resp.status != 200:
                 log.warning("%s  HTTP %d for %s", indent, dl_resp.status, filename)
+                seen_ids.discard(file_id)  # allow retry on next run
                 continue
             body = await dl_resp.body()
             save_path = dest_dir / filename
@@ -391,6 +410,7 @@ async def _api_download_folder(api, dest_dir: Path, folder_id: str, depth: int =
             log.info("%s  Saved: %s", indent, save_path)
         except Exception as exc:
             log.warning("%s  Failed: %s — %s", indent, filename, exc)
+            seen_ids.discard(file_id)  # allow retry on next run
 
 
 class _TextExtractor(HTMLParser):
