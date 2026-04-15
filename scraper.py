@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import sys
+from datetime import date
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -174,6 +175,19 @@ async def _scrape_courses_from_page(page: Page, seen_urls: set) -> list[dict]:
     return courses
 
 
+def _semester_started(sem_name: str) -> bool:
+    """Return True if the semester has already started (filter out future semesters).
+    SoSe YYYY starts April 1 · WiSe YYYY/YY starts October 1 of the first year."""
+    today = date.today()
+    m = re.match(r'SoSe\s+(\d{4})', sem_name, re.IGNORECASE)
+    if m:
+        return date(int(m.group(1)), 4, 1) <= today
+    m = re.match(r'WiSe\s+(\d{4})', sem_name, re.IGNORECASE)
+    if m:
+        return date(int(m.group(1)), 10, 1) <= today
+    return True  # unknown format → keep
+
+
 async def get_all_semester_courses(page: Page) -> list[dict]:
     """
     Return courses grouped by semester by switching the semester filter for
@@ -210,11 +224,14 @@ async def get_all_semester_courses(page: Page) -> list[dict]:
         log.info("Found %d course(s) total (no semester grouping)", len(courses))
         return [{"semester": "Alle Kurse", "courses": courses}]
 
+    # Drop semesters that haven't started yet (Stud.IP lists future ones too)
+    semester_options = [s for s in semester_options if _semester_started(s["name"])]
+
     log.info("Found %d semester(s) in filter: %s",
              len(semester_options), [s["name"] for s in semester_options[:5]])
 
     # ── Step 2: for each semester, set filter → scrape ──────────────────────
-    # Only scrape recent semesters (skip far future/past beyond last 6)
+    # Only scrape recent semesters (skip far past beyond last 6)
     MAX_SEMESTERS = 6
     semesters_to_scrape = semester_options[:MAX_SEMESTERS]
 

@@ -1,6 +1,7 @@
 anthropic
 flask
 markdown2
+openai
 playwright
 pymupdf
 python-docx

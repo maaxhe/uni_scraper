@@ -28,7 +28,8 @@ load_dotenv()
 COURSES_DIR = Path(os.environ.get("COURSES_DIR", "/Users/maxmacbookpro/Documents/Uni/Cognitive Science [Course]/Courses"))
 SUPPORTED_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt", ".md", ".pptx", ".ppt"}
 MAX_CHARS = 40_000
-MODEL = "claude-opus-4-6"
+MODEL_ANTHROPIC = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-6")
+MODEL_OPENAI    = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 OUTPUT_FILENAME = "_zusammenfassung.md"
 
 logging.basicConfig(
@@ -108,7 +109,7 @@ PROMPTS = {
 }
 
 
-def summarize_files(client: anthropic.Anthropic, course_name: str, files: list[dict], lang: str = "en") -> str:
+def summarize_files(client, client_type: str, course_name: str, files: list[dict], lang: str = "en") -> str:
     p = PROMPTS.get(lang, PROMPTS["en"])
 
     files_block = ""
@@ -146,19 +147,31 @@ Use this exact structure for each file (all bullet points, no prose):
 
 Files:{files_block}"""
 
-    try:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=4000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-    except anthropic.AuthenticationError:
-        log.error("ANTHROPIC_API_KEY ungültig – neuen Key unter https://console.anthropic.com erstellen.")
-        sys.exit(1)
-    except anthropic.APIConnectionError:
-        log.error("Verbindung zur Anthropic API fehlgeschlagen – Internetverbindung prüfen.")
-        sys.exit(1)
-    return response.content[0].text
+    if client_type == "anthropic":
+        try:
+            response = client.messages.create(
+                model=MODEL_ANTHROPIC,
+                max_tokens=4000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except anthropic.AuthenticationError:
+            log.error("ANTHROPIC_API_KEY ungültig – neuen Key unter https://console.anthropic.com erstellen.")
+            sys.exit(1)
+        except anthropic.APIConnectionError:
+            log.error("Verbindung zur Anthropic API fehlgeschlagen – Internetverbindung prüfen.")
+            sys.exit(1)
+        return response.content[0].text
+    else:  # openai-compatible (OpenAI, Groq, Mistral, Ollama, …)
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_OPENAI,
+                max_tokens=4000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except Exception as e:
+            log.error("API error: %s", e)
+            sys.exit(1)
+        return response.choices[0].message.content
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +196,8 @@ def find_course(name_query: str) -> Path | None:
 
 
 def process_course(
-    client: anthropic.Anthropic,
+    client,
+    client_type: str,
     course_dir: Path,
     limit: int,
     force: bool,
@@ -236,9 +250,9 @@ def process_course(
         log.warning("  No readable files.")
         return
 
-    log.info("  → Sending %d file(s) to Claude…", len(file_contents))
+    log.info("  → Sending %d file(s) to AI…", len(file_contents))
     try:
-        summary = summarize_files(client, course_dir.name, file_contents, lang=lang)
+        summary = summarize_files(client, client_type, course_dir.name, file_contents, lang=lang)
         p = PROMPTS.get(lang, PROMPTS["en"])
         header = p["header"].format(
             name=course_dir.name,
@@ -267,12 +281,32 @@ def main() -> None:
     parser.add_argument("--out", metavar="FILENAME", default=None, help="Output filename (overrides default _zusammenfassung.md)")
     args = parser.parse_args()
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        log.error("ANTHROPIC_API_KEY missing in .env")
-        sys.exit(1)
+    # ── Build AI client — Anthropic takes priority, then any OpenAI-compatible provider ──
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    openai_key    = os.environ.get("OPENAI_API_KEY")
 
-    client = anthropic.Anthropic(api_key=api_key)
+    if anthropic_key:
+        client      = anthropic.Anthropic(api_key=anthropic_key)
+        client_type = "anthropic"
+        log.info("Using Anthropic (model: %s)", MODEL_ANTHROPIC)
+    elif openai_key:
+        try:
+            from openai import OpenAI
+        except ImportError:
+            log.error("openai package not installed. Run: pip install openai")
+            sys.exit(1)
+        base_url    = os.environ.get("OPENAI_BASE_URL") or None
+        client      = OpenAI(api_key=openai_key, base_url=base_url)
+        client_type = "openai"
+        log.info("Using OpenAI-compatible API (model: %s%s)", MODEL_OPENAI,
+                 f", base_url: {base_url}" if base_url else "")
+    else:
+        log.error(
+            "No API key found in .env.\n"
+            "  Set ANTHROPIC_API_KEY  →  https://console.anthropic.com\n"
+            "  or OPENAI_API_KEY      →  https://platform.openai.com/api-keys"
+        )
+        sys.exit(1)
 
     if args.dir:
         course_dir = Path(args.dir)
@@ -280,19 +314,19 @@ def main() -> None:
             log.error("Directory not found: %s", args.dir)
             sys.exit(1)
         log.info("── Course: %s", course_dir.name)
-        process_course(client, course_dir, args.limit, args.force, only_files=args.files, lang=args.lang, output_filename=args.out)
+        process_course(client, client_type, course_dir, args.limit, args.force, only_files=args.files, lang=args.lang, output_filename=args.out)
     elif args.course:
         course_dir = find_course(args.course)
         if not course_dir:
             log.error("No course found for: '%s'", args.course)
             sys.exit(1)
         log.info("── Course: %s", course_dir.name)
-        process_course(client, course_dir, args.limit, args.force, only_files=args.files, lang=args.lang, output_filename=args.out)
+        process_course(client, client_type, course_dir, args.limit, args.force, only_files=args.files, lang=args.lang, output_filename=args.out)
     else:
         for course_dir in sorted(COURSES_DIR.iterdir()):
             if course_dir.is_dir():
                 log.info("── Course: %s", course_dir.name)
-                process_course(client, course_dir, args.limit, args.force, lang=args.lang)
+                process_course(client, client_type, course_dir, args.limit, args.force, lang=args.lang)
 
     log.info("Done.")
 

@@ -168,14 +168,31 @@ COURSES_DIR=C:/Users/mmueller/Documents/Uni/Courses
 
 ---
 
-### Step 7 – Get an Anthropic API key _(optional — only for AI summaries)_
+### Step 7 – Get an AI API key _(optional — only for summaries and chat)_
 
-Skip this step if you only want to sync and browse files.
+**You can skip this step entirely** if you just want to sync and browse your course files. The file download, PDF viewer, notes, and search all work without any API key.
 
+An API key unlocks:
+- **AI summaries** — automatically summarise an entire course from its files
+- **Flashcards** — generated from the summary
+- **AI chat** — ask questions about your course materials
+
+You only need **one** of the following options:
+
+#### Option A — Anthropic (Claude) ✦ recommended
 1. Go to [console.anthropic.com](https://console.anthropic.com) and create a free account
-2. New accounts receive free trial credit — no credit card required
-3. In the left menu click **"API Keys"** → **"Create Key"**
-4. Copy the key and paste it into your `.env` file as `ANTHROPIC_API_KEY=sk-ant-...`
+2. New accounts get free trial credit — no credit card required
+3. Click **"API Keys"** → **"Create Key"** → copy the key
+4. Add to `.env`: `ANTHROPIC_API_KEY=sk-ant-...`
+
+#### Option B — OpenAI (GPT-4o)
+1. Go to [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
+2. Create an account and add a small amount of credit (a few euros covers months of use)
+3. Click **"Create new secret key"** → copy the key
+4. Add to `.env`: `OPENAI_API_KEY=sk-...`
+
+#### Option C — Other providers (Groq, Mistral, Ollama, …)
+Any OpenAI-compatible API works. Set `OPENAI_API_KEY` and `OPENAI_BASE_URL` in `.env`. Examples are in `.env.example`.
 
 ---
 
@@ -196,6 +213,29 @@ Then open your browser and go to:
 **→ [http://localhost:5001](http://localhost:5001)**
 
 The dashboard is now running. Keep the terminal open — closing it stops the app.
+
+> **Want it to run in the background without a terminal?** See the next section.
+
+---
+
+## Run in the background (no terminal needed) — macOS
+
+Instead of keeping a terminal open, you can install the dashboard as a background service that starts automatically every time you log in.
+
+**Set up:**
+```
+./autostart.sh install
+```
+
+That's it. The dashboard now runs silently in the background and restarts automatically on login or if it ever crashes.
+
+**Other commands:**
+
+| Command | What it does |
+|---------|-------------|
+| `./autostart.sh status` | Check if the dashboard is running |
+| `./autostart.sh logs` | Show live log output |
+| `./autostart.sh uninstall` | Stop the dashboard and remove autostart |
 
 ---
 

@@ -4232,17 +4232,21 @@ function _setupErrorMsg(type) {
 ╔══════════════════════════════════════════════════════════════╗
   ❌  Kein API-Key konfiguriert
 ══════════════════════════════════════════════════════════════════
-  Die KI-Zusammenfassung benötigt einen Anthropic API-Key.
+  Für KI-Zusammenfassungen wird ein API-Key benötigt.
+  Trage einen der folgenden Keys in die .env-Datei ein:
 
-  So richtest du ihn ein:
-  1. Öffne die Datei ".env" im Projektordner (z. B. mit dem
-     Editor oder VS Code)
-  2. Trage deinen Key in diese Zeile ein:
-        ANTHROPIC_API_KEY=sk-ant-dein-key-hier
+  Option A – Anthropic (empfohlen, kostenloser Testkredit):
+    ANTHROPIC_API_KEY=sk-ant-...
+    → https://console.anthropic.com  →  "API Keys"
 
-  Noch keinen Key?
-  → https://console.anthropic.com  →  "Get API keys"
-  (kostenloser Testkredit inklusive, keine Kreditkarte nötig)
+  Option B – OpenAI (GPT):
+    OPENAI_API_KEY=sk-...
+    → https://platform.openai.com/api-keys
+
+  Option C – Andere (Groq, Mistral, Ollama …):
+    OPENAI_API_KEY=dein-key
+    OPENAI_BASE_URL=https://api.groq.com/openai/v1
+    OPENAI_MODEL=llama-3.3-70b-versatile
 ╚══════════════════════════════════════════════════════════════╝`,
     bad_key: `
 
