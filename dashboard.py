@@ -24,7 +24,8 @@ SCRAPER_SCRIPT   = str(Path(__file__).parent / "scraper.py")
 PIPELINE_LOG     = str(Path(__file__).parent / "pipeline.log")
 OUTPUT_FILENAME  = "_zusammenfassung.md"
 SUMMARY_RE       = re.compile(r'^_zusammenfassung.*\.md$')
-NOTES_FILENAME   = "_notizen.md"
+NOTES_FILENAME      = "_notizen.md"
+FILE_NOTES_FILENAME = "_file_notes.json"
 PROGRESS_FILE    = Path(__file__).parent / "progress.json"
 SUPPORTED_EXT    = {".pdf", ".doc", ".docx", ".txt", ".md", ".pptx", ".ppt"}
 
@@ -147,6 +148,7 @@ def list_files(course_dir: Path) -> list[str]:
         if f.is_file()
         and not SUMMARY_RE.match(f.name)
         and f.name != NOTES_FILENAME
+        and f.name != FILE_NOTES_FILENAME
         and ".summary" not in f.name
     ])
 
@@ -303,6 +305,31 @@ def api_all_flashcards():
         else:
             all_cards.extend(_collect_flashcards(d.name, d))
     return jsonify(all_cards)
+
+@app.route("/api/file-note/<path:course_name>/<path:filename>", methods=["GET", "POST"])
+def api_file_note(course_name, filename):
+    notes_file = COURSES_DIR / course_name / FILE_NOTES_FILENAME
+    notes = json.loads(notes_file.read_text(encoding="utf-8")) if notes_file.exists() else {}
+    if request.method == "POST":
+        text = request.json.get("text", "")
+        if text.strip():
+            notes[filename] = text
+        elif filename in notes:
+            del notes[filename]
+        notes_file.write_text(json.dumps(notes, indent=2, ensure_ascii=False), encoding="utf-8")
+        return jsonify({"ok": True})
+    return jsonify({"text": notes.get(filename, "")})
+
+@app.route("/api/file-note-download/<path:course_name>/<path:filename>")
+def api_file_note_download(course_name, filename):
+    notes_file = COURSES_DIR / course_name / FILE_NOTES_FILENAME
+    notes = json.loads(notes_file.read_text(encoding="utf-8")) if notes_file.exists() else {}
+    text = notes.get(filename, "")
+    stem = Path(filename).stem
+    md_name = f"{stem}_notizen.md"
+    from flask import Response
+    return Response(text, mimetype="text/markdown",
+                    headers={"Content-Disposition": f"attachment; filename=\"{md_name}\""})
 
 @app.route("/api/notes/<path:course_name>", methods=["GET", "POST"])
 def api_notes(course_name):
@@ -1244,7 +1271,7 @@ body {
   padding: 2px 6px; font-size: 10px; font-family: "SF Mono", monospace; color: var(--text2);
 }
 
-/* Notes panel */
+/* Notes panel (course-level) */
 .notes-panel { display: flex; flex-direction: column; height: calc(100vh - 158px); }
 .notes-toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
 #notes-editor {
@@ -1260,6 +1287,41 @@ body {
   display: none;
 }
 #notes-saved { font-size: 12px; display: none; }
+
+/* File-level notes sliding panel */
+.files-notes-col {
+  width: 0; overflow: hidden; flex-shrink: 0;
+  transition: width 200ms ease;
+  border-left: 1px solid transparent;
+  display: flex; flex-direction: column;
+}
+.files-notes-col.open {
+  width: 290px; min-width: 200px;
+  border-left-color: var(--border);
+}
+.fnotes-header {
+  padding: 10px 14px 8px;
+  display: flex; align-items: center; gap: 8px;
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.fnotes-title {
+  font-size: 11px; font-weight: 600; color: var(--text3); flex: 1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.fnotes-dl-btn {
+  background: none; border: none; color: var(--text3); cursor: pointer;
+  font-size: 13px; padding: 2px 5px; border-radius: 4px; line-height: 1;
+  transition: color var(--transition), background var(--transition);
+}
+.fnotes-dl-btn:hover { color: var(--text2); background: var(--bg3); }
+#fnotes-saved { font-size: 10px; color: var(--text3); white-space: nowrap; }
+#fnotes-editor {
+  flex: 1; background: transparent; border: none; outline: none;
+  color: var(--text2); font-size: 12.5px; line-height: 1.75;
+  resize: none; padding: 14px 14px;
+  font-family: inherit;
+}
+#fnotes-editor::placeholder { color: var(--text3); }
 
 /* Search results */
 .search-results-header { font-size: 12px; color: var(--text3); margin-bottom: 16px; }
@@ -1695,6 +1757,16 @@ body {
               </div>
             </div>
           </div>
+          <!-- File notes panel (slides in from right) -->
+          <div class="files-notes-col" id="files-notes-col">
+            <div class="fnotes-header">
+              <span class="fnotes-title" id="fnotes-title">Notizen</span>
+              <span id="fnotes-saved"></span>
+              <button class="fnotes-dl-btn" title="Als Markdown herunterladen" onclick="downloadFileNote()">⬇</button>
+              <button class="fnotes-dl-btn" title="Schließen" onclick="toggleFileNotes()">✕</button>
+            </div>
+            <textarea id="fnotes-editor" placeholder="Notizen zu dieser Datei… (Markdown)"></textarea>
+          </div>
         </div>
       </div>
 
@@ -1785,6 +1857,7 @@ body {
     <div class="shortcut-row"><kbd>2</kbd>          <span class="shortcut-desc">Tab Zusammenfassung</span></div>
     <div class="shortcut-row"><kbd>3</kbd>          <span class="shortcut-desc">Tab Lernen</span></div>
     <div class="shortcut-row"><kbd>4</kbd>          <span class="shortcut-desc">Tab Notizen</span></div>
+    <div class="shortcut-row"><kbd>N</kbd>          <span class="shortcut-desc">Datei-Notizen ein/aus</span></div>
     <div class="shortcut-row"><kbd>5</kbd>          <span class="shortcut-desc">Tab Fragen (AI Chat)</span></div>
     <div style="margin-top:20px;text-align:right">
       <button class="tbtn btn-gray" onclick="hideShortcuts()">Schließen</button>
@@ -2557,6 +2630,7 @@ async function previewFile(filename) {
   _clearReadTimer();
   activePreviewFile = filename;
   localStorage.setItem('last_file__' + activeCourse, filename);
+  _loadFileNote(filename); // load notes for this file if panel is open
   document.querySelectorAll('.file-item').forEach(el => {
     el.classList.toggle('active', el.dataset.filename === filename);
   });
@@ -2580,6 +2654,9 @@ async function previewFile(filename) {
       onclick="toggleReadFile('${esc(filename)}')">${read ? '✓ Gelesen' : 'Als gelesen markieren'}</button>
     <a href="/api/file-raw/${enc(activeCourse)}/${enc(filename)}" download title="Herunterladen"
        style="color:var(--text3);font-size:13px;text-decoration:none" onclick="event.stopPropagation()">⬇</a>
+    <button id="fnotes-toggle-btn" onclick="toggleFileNotes()" title="Datei-Notizen (N)"
+      style="background:none;border:none;cursor:pointer;font-size:13px;padding:2px 5px;border-radius:4px;color:var(--text3);transition:color var(--transition),background var(--transition)"
+      onmouseover="this.style.background='var(--bg4)'" onmouseout="this.style.background='none'">✏️</button>
     ${isPdf ? `<button id="fullscreen-btn" onclick="togglePreviewFullscreen()" title="Vollbild (F)">⛶</button>` : ''}`;
   body.innerHTML = '<div class="preview-placeholder"><div class="icon">⏳</div><div>Lade…</div></div>';
   body.className = 'preview-body';
@@ -3337,6 +3414,10 @@ document.addEventListener('keydown', e => {
     if (e.key === 'r' && activeTab === 'files' && activePreviewFile) {
       toggleReadFile(activePreviewFile); return;
     }
+    // N = toggle file notes panel
+    if (e.key === 'n' && activeTab === 'files') {
+      toggleFileNotes(); return;
+    }
   }
 
   // Flashcard shortcuts
@@ -3381,6 +3462,67 @@ async function saveNotes() {
   setTimeout(() => { el.style.display = 'none'; }, 2000);
   allCourses = allCourses.map(c => c.path === activeCourse ? {...c, has_notes: true} : c);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// File-level notes (sliding right panel)
+// ═══════════════════════════════════════════════════════════════════════════
+let _fileNotesOpen   = false;
+let _fileNotesFile   = null;   // currently loaded filename
+let _fileNotesSaveTimer = null;
+
+function toggleFileNotes() {
+  _fileNotesOpen = !_fileNotesOpen;
+  const col = document.getElementById('files-notes-col');
+  col.classList.toggle('open', _fileNotesOpen);
+  if (_fileNotesOpen && activePreviewFile) {
+    _loadFileNote(activePreviewFile);
+  }
+  // update toggle button color to indicate state
+  const btn = document.getElementById('fnotes-toggle-btn');
+  if (btn) btn.style.color = _fileNotesOpen ? 'var(--blue)' : 'var(--text3)';
+}
+
+// Called whenever a new file is selected in the preview
+async function _loadFileNote(filename) {
+  if (!_fileNotesOpen) return;
+  _fileNotesFile = filename;
+  const editor = document.getElementById('fnotes-editor');
+  const title  = document.getElementById('fnotes-title');
+  title.textContent = filename.split('/').pop();
+  editor.value = '';
+  document.getElementById('fnotes-saved').textContent = '';
+  try {
+    const data = await fetch(`/api/file-note/${enc(activeCourse)}/${enc(filename)}`).then(r => r.json());
+    editor.value = data.text || '';
+  } catch(_) {}
+}
+
+async function _saveFileNote() {
+  if (!_fileNotesFile) return;
+  const text = document.getElementById('fnotes-editor').value;
+  await fetch(`/api/file-note/${enc(activeCourse)}/${enc(_fileNotesFile)}`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ text }),
+  });
+  const el = document.getElementById('fnotes-saved');
+  el.textContent = '✓';
+  el.style.color = 'var(--green)';
+  setTimeout(() => { if (el) el.textContent = ''; }, 1800);
+}
+
+function downloadFileNote() {
+  if (!_fileNotesFile) return;
+  window.location.href = `/api/file-note-download/${enc(activeCourse)}/${enc(_fileNotesFile)}`;
+}
+
+// Auto-save on input (debounced)
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('fnotes-editor').addEventListener('input', () => {
+    clearTimeout(_fileNotesSaveTimer);
+    _fileNotesSaveTimer = setTimeout(_saveFileNote, 600);
+  });
+});
 
 function toggleNotesPreview() {
   notesPreviewMode = !notesPreviewMode;
