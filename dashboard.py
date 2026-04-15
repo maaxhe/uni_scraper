@@ -2727,12 +2727,15 @@ async function _renderPdf(container) {
   }
   if (gen !== _pdfGen) return; // superseded
 
-  container.innerHTML = ''; // clear old canvases only right before we paint new ones
-
+  // Render all pages into an off-screen DocumentFragment first, then
+  // atomically swap — canvas rendering works without being in the DOM,
+  // so the old content stays visible until everything is ready.
+  const fragment = document.createDocumentFragment();
   const dpr = window.devicePixelRatio || 1;
+
   for (const page of pages) {
     if (gen !== _pdfGen) return; // superseded mid-render
-    const viewport    = page.getViewport({ scale: scale * dpr }); // render at physical pixels
+    const viewport = page.getViewport({ scale: scale * dpr }); // render at physical pixels
     const cssW = (viewport.width  / dpr) + 'px';
     const cssH = (viewport.height / dpr) + 'px';
 
@@ -2742,10 +2745,10 @@ async function _renderPdf(container) {
     wrapper.style.width  = cssW;
     wrapper.style.height = cssH;
 
-    const canvas      = document.createElement('canvas');
-    canvas.className  = 'pdf-page-canvas';
-    canvas.width      = viewport.width;   // physical pixel size
-    canvas.height     = viewport.height;
+    const canvas     = document.createElement('canvas');
+    canvas.className = 'pdf-page-canvas';
+    canvas.width     = viewport.width;  // physical pixel size
+    canvas.height    = viewport.height;
     canvas.style.width  = cssW;
     canvas.style.height = cssH;
     wrapper.appendChild(canvas);
@@ -2757,11 +2760,13 @@ async function _renderPdf(container) {
     textLayer.style.height = cssH;
     wrapper.appendChild(textLayer);
 
-    container.appendChild(wrapper);
+    fragment.appendChild(wrapper);
 
+    // Render canvas while it's still off-screen (works fine without being in the DOM)
     await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+    if (gen !== _pdfGen) return;
 
-    // Render text at CSS scale (not physical), so positions match CSS pixels
+    // Text layer at CSS scale so positions match CSS pixels
     const cssViewport = page.getViewport({ scale });
     try {
       const textContent = await page.getTextContent();
@@ -2778,6 +2783,11 @@ async function _renderPdf(container) {
   }
 
   if (gen !== _pdfGen) return;
+
+  // Atomic swap — old pages stay visible until all new pages are fully painted
+  container.innerHTML = '';
+  container.appendChild(fragment);
+
   _updateZoomLabel(container, scale);
   _setupPdfPageIndicator(container);
 }
