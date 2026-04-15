@@ -416,61 +416,106 @@ class _TextExtractor(HTMLParser):
         return re.sub(r'\s+', ' ', ''.join(self._parts)).strip()
 
 
-async def _fetch_details_page_description(api, cid: str) -> str:
+def _html_text(html_fragment: str) -> str:
+    """Strip HTML tags from a fragment and return clean plain text."""
+    ex = _TextExtractor()
+    ex.feed(html_fragment)
+    return ex.text()
+
+
+async def _fetch_details_page_meta(api, cid: str) -> dict:
     """
-    Scrape the description from the Stud.IP course details HTML page.
-    Returns empty string if nothing useful found.
+    Scrape the Stud.IP course details HTML page and return a dict with:
+      description, ects, sws, type, participants, location, lecturer_html, …
+    All fields are optional strings; missing ones are left out.
     """
     url = f"{STUDIP_BASE}/dispatch.php/course/details/?cid={cid}"
     try:
         resp = await api.get(url)
         if resp.status != 200:
-            return ""
+            return {}
         html = await resp.text()
     except Exception:
-        return ""
+        return {}
 
-    # Strategy 1: look for a <section> whose header contains "Beschreibung"
-    # or a <div class="..."> following such a heading.
-    # Stud.IP 4/5 wraps content blocks like:
-    #   <section class="content-block"><header><h1>Beschreibung</h1></header>
-    #     <div class="content">...</div></section>
-    m = re.search(
-        r'Beschreibung\b.{0,300}?<(?:div|td)[^>]*class="[^"]*(?:content|desc|text)[^"]*"[^>]*>(.*?)</(?:div|td)>',
-        html, re.DOTALL | re.IGNORECASE,
+    result: dict = {}
+
+    # ── 1. Key-value table rows (Stud.IP 4/5) ────────────────────────────
+    # Matches <tr> blocks with two <td> or <th>/<td> cells.
+    # Labels (first cell) are mapped to field names.
+    LABEL_MAP = {
+        "veranstaltungsform":   "type",
+        "veranstaltungs-nr":    "course_no",
+        "veranstaltungsnummer": "course_no",
+        "semester":             "semester",
+        "ects":                 "ects",
+        "ects-punkte":          "ects",
+        "sws":                  "sws",
+        "semesterwochenstunden":"sws",
+        "teilnehmerzahl":       "participants",
+        "max. teilnehmerzahl":  "participants",
+        "teilnehmer":           "participants",
+        "ort":                  "location",
+        "raum":                 "location",
+        "veranstaltungsort":    "location",
+        "heimateinrichtung":    "institution",
+        "einrichtung":          "institution",
+        "sprache":              "language",
+        "lehrende":             "lecturers",
+        "dozent":               "lecturers",
+        "dozenten":             "lecturers",
+        "lehrperson":           "lecturers",
+    }
+
+    # Match table rows with exactly two cells
+    row_re = re.compile(
+        r'<tr[^>]*>\s*'
+        r'<t[hd][^>]*>([\s\S]*?)</t[hd]>\s*'
+        r'<t[hd][^>]*>([\s\S]*?)</t[hd]>\s*'
+        r'</tr>',
+        re.IGNORECASE,
     )
-    if m:
-        ex = _TextExtractor()
-        ex.feed(m.group(1))
-        desc = ex.text()
-        if len(desc) > 10:
-            return desc
+    for m in row_re.finditer(html):
+        label_raw = _html_text(m.group(1))
+        value_raw = _html_text(m.group(2))
+        label_key = re.sub(r'\s+', ' ', label_raw.lower()).strip().rstrip(':')
+        if label_key in LABEL_MAP and value_raw:
+            field = LABEL_MAP[label_key]
+            if field not in result:   # first match wins
+                result[field] = value_raw
 
-    # Strategy 2: table row – label cell says "Beschreibung", next cell has value
-    m = re.search(
-        r'<td[^>]*>[\s\S]{0,50}?Beschreibung[\s\S]{0,50}?</td>\s*<td[^>]*>([\s\S]*?)</td>',
-        html, re.IGNORECASE,
+    # ── 2. <dt>/<dd> definition lists ────────────────────────────────────
+    dl_re = re.compile(
+        r'<dt[^>]*>([\s\S]*?)</dt>\s*<dd[^>]*>([\s\S]*?)</dd>',
+        re.IGNORECASE,
     )
-    if m:
-        ex = _TextExtractor()
-        ex.feed(m.group(1))
-        desc = ex.text()
-        if len(desc) > 10:
-            return desc
+    for m in dl_re.finditer(html):
+        label_key = re.sub(r'\s+', ' ', _html_text(m.group(1)).lower()).strip().rstrip(':')
+        value_raw = _html_text(m.group(2))
+        if label_key in LABEL_MAP and value_raw:
+            field = LABEL_MAP[label_key]
+            if field not in result:
+                result[field] = value_raw
 
-    # Strategy 3: any <div> with id or class containing "description"
-    m = re.search(
-        r'<div[^>]+(?:id|class)="[^"]*description[^"]*"[^>]*>([\s\S]*?)</div>',
-        html, re.IGNORECASE,
-    )
-    if m:
-        ex = _TextExtractor()
-        ex.feed(m.group(1))
-        desc = ex.text()
-        if len(desc) > 10:
-            return desc
+    # ── 3. Description block ──────────────────────────────────────────────
+    # Try several patterns for the long free-text description.
+    desc_patterns = [
+        # section with "Beschreibung" heading followed by a content div/td
+        r'Beschreibung\b[\s\S]{0,400}?<(?:div|td)[^>]*class="[^"]*(?:content|desc|text|wiki)[^"]*"[^>]*>([\s\S]*?)</(?:div|td)>',
+        # table row labelled "Beschreibung"
+        r'<td[^>]*>[\s\S]{0,60}?Beschreibung[\s\S]{0,60}?</td>\s*<td[^>]*>([\s\S]*?)</td>',
+        # div/section with id/class "description"
+        r'<(?:div|section)[^>]+(?:id|class)="[^"]*beschreibung[^"]*"[^>]*>([\s\S]*?)</(?:div|section)>',
+    ]
+    for pat in desc_patterns:
+        m = re.search(pat, html, re.IGNORECASE)
+        if m:
+            desc = _html_text(m.group(1))
+            if len(desc) > 10:
+                result["description"] = desc
+                break
 
-    return ""
+    return result
 
 
 async def _fetch_course_meta(api, cid: str) -> dict:
@@ -536,21 +581,32 @@ async def _fetch_course_meta(api, cid: str) -> dict:
     }
     type_label = type_labels.get(str(course_type), str(course_type)) if course_type else ""
 
-    # REST API often returns empty description — fall back to HTML details page
-    description = (data.get("description") or "").strip()
-    if not description:
-        description = await _fetch_details_page_description(api, cid)
+    # HTML details page — contains ECTS, SWS, description and more that REST API often omits
+    html_meta = await _fetch_details_page_meta(api, cid)
+
+    def pick(*candidates: str) -> str:
+        """Return first non-empty candidate."""
+        for c in candidates:
+            if c:
+                return c
+        return ""
+
+    api_semester = data.get("start_semester", {}).get("title", "") if isinstance(data.get("start_semester"), dict) else ""
 
     return {
-        "title":       data.get("title") or data.get("name") or "",
-        "subtitle":    data.get("subtitle") or "",
-        "description": description,
-        "type":        type_label,
-        "lecturers":   lecturers,
-        "semester":    data.get("start_semester", {}).get("title", "") if isinstance(data.get("start_semester"), dict) else "",
-        "location":    data.get("location") or "",
-        "ects":        data.get("ects") or "",
-        "participants": data.get("admission_turnout") or "",
+        "title":        pick(data.get("title") or data.get("name") or ""),
+        "subtitle":     data.get("subtitle") or "",
+        "description":  pick((data.get("description") or "").strip(), html_meta.get("description", "")),
+        "type":         pick(type_label, html_meta.get("type", "")),
+        "lecturers":    lecturers if lecturers else ([html_meta["lecturers"]] if html_meta.get("lecturers") else []),
+        "semester":     pick(api_semester, html_meta.get("semester", "")),
+        "location":     pick(data.get("location") or "", html_meta.get("location", "")),
+        "ects":         pick(str(data.get("ects") or ""), html_meta.get("ects", "")),
+        "sws":          html_meta.get("sws", ""),
+        "participants": pick(str(data.get("admission_turnout") or ""), html_meta.get("participants", "")),
+        "course_no":    html_meta.get("course_no", ""),
+        "institution":  html_meta.get("institution", ""),
+        "language":     html_meta.get("language", ""),
     }
 
 

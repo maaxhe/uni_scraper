@@ -2929,9 +2929,13 @@ async function loadInfo() {
         ${row('Dozent/-in', lecturers)}
         ${row('Typ', info.type)}
         ${row('Semester', info.semester)}
-        ${row('Ort', info.location)}
         ${row('ECTS', info.ects)}
+        ${row('SWS', info.sws)}
         ${row('Teilnehmer', info.participants)}
+        ${row('Ort', info.location)}
+        ${row('Veranst.-Nr.', info.course_no)}
+        ${row('Einrichtung', info.institution)}
+        ${row('Sprache', info.language)}
       </div>
       ${info.description ? `<div class="info-desc">${esc(info.description)}</div>` : ''}
     </div>`;
