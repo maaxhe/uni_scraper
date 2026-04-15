@@ -1165,11 +1165,30 @@ body {
 }
 .textLayer ::selection { background: rgba(58,130,246,.35); color: transparent; }
 
-/* Fullscreen */
-.preview-box:fullscreen { border-radius: 0; }
-.preview-box:fullscreen .preview-body { height: calc(100vh - 45px); }
-.preview-box:-webkit-full-screen { border-radius: 0; }
-.preview-box:-webkit-full-screen .preview-body { height: calc(100vh - 45px); }
+/* Fake fullscreen — covers entire viewport, includes notes panel */
+#preview-area {
+  display: contents; /* no layout effect when not fullscreen */
+}
+#preview-area.fullscreen {
+  display: flex;
+  position: fixed; inset: 0; z-index: 500;
+  background: var(--bg);
+}
+#preview-area.fullscreen .files-preview-col {
+  flex: 1; min-width: 0; overflow: hidden; display: flex; flex-direction: column;
+}
+#preview-area.fullscreen .preview-box {
+  flex: 1; border-radius: 0; border: none; height: 100%;
+}
+#preview-area.fullscreen .preview-body {
+  height: calc(100vh - 42px);
+}
+#preview-area.fullscreen .files-notes-col.open {
+  height: 100vh; border-top: none; border-left: 1px solid var(--border);
+}
+#preview-area.fullscreen .files-notes-col #fnotes-editor {
+  height: calc(100vh - 44px);
+}
 
 /* Zoom controls in preview header */
 .zoom-controls { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
@@ -1749,31 +1768,34 @@ body {
           </div>
           <!-- Files / Preview resize divider -->
           <div class="resize-divider" id="divider-files" title="Ziehen zum Anpassen"></div>
-          <div class="files-preview-col" id="files-preview-col">
-            <div class="preview-box">
-              <div class="preview-header" id="preview-header">
-                <button id="filelist-show-btn" onclick="toggleFileList()" title="Dateiliste einblenden"
-                  style="display:none;background:none;border:none;cursor:pointer;color:var(--text3);font-size:13px;padding:2px 6px;border-radius:4px;margin-right:4px;transition:color var(--transition),background var(--transition)"
-                  onmouseover="this.style.background='var(--bg4)'" onmouseout="this.style.background='none'">▶ Liste</button>
-                <span class="preview-header-name">Datei auswählen zum Anzeigen</span>
-              </div>
-              <div class="preview-body" id="preview-body">
-                <div class="preview-placeholder">
-                  <div class="icon">👆</div>
-                  <div>Datei anklicken</div>
+          <!-- preview-area wraps both preview and notes so fake-fullscreen includes both -->
+          <div id="preview-area">
+            <div class="files-preview-col" id="files-preview-col">
+              <div class="preview-box">
+                <div class="preview-header" id="preview-header">
+                  <button id="filelist-show-btn" onclick="toggleFileList()" title="Dateiliste einblenden"
+                    style="display:none;background:none;border:none;cursor:pointer;color:var(--text3);font-size:13px;padding:2px 6px;border-radius:4px;margin-right:4px;transition:color var(--transition),background var(--transition)"
+                    onmouseover="this.style.background='var(--bg4)'" onmouseout="this.style.background='none'">▶ Liste</button>
+                  <span class="preview-header-name">Datei auswählen zum Anzeigen</span>
+                </div>
+                <div class="preview-body" id="preview-body">
+                  <div class="preview-placeholder">
+                    <div class="icon">👆</div>
+                    <div>Datei anklicken</div>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-          <!-- File notes panel (slides in from right) -->
-          <div class="files-notes-col" id="files-notes-col">
-            <div class="fnotes-header">
-              <span class="fnotes-title" id="fnotes-title">Notizen</span>
-              <span id="fnotes-saved"></span>
-              <button class="fnotes-dl-btn" title="Als Markdown herunterladen" onclick="downloadFileNote()">⬇</button>
-              <button class="fnotes-dl-btn" title="Schließen" onclick="toggleFileNotes()">✕</button>
+            <!-- File notes panel (slides in from right) -->
+            <div class="files-notes-col" id="files-notes-col">
+              <div class="fnotes-header">
+                <span class="fnotes-title" id="fnotes-title">Notizen</span>
+                <span id="fnotes-saved"></span>
+                <button class="fnotes-dl-btn" title="Als Markdown herunterladen" onclick="downloadFileNote()">⬇</button>
+                <button class="fnotes-dl-btn" title="Schließen" onclick="toggleFileNotes()">✕</button>
+              </div>
+              <textarea id="fnotes-editor" placeholder="Notizen zu dieser Datei… (Markdown)"></textarea>
             </div>
-            <textarea id="fnotes-editor" placeholder="Notizen zu dieser Datei… (Markdown)"></textarea>
           </div>
         </div>
       </div>
@@ -2919,24 +2941,27 @@ function _setupPdfWheelZoom(body) {
   }, { passive: false });
 }
 
+let _isFullscreen = false;
+
 function togglePreviewFullscreen() {
-  const box = document.querySelector('.preview-box');
-  if (!document.fullscreenElement) {
-    (box.requestFullscreen || box.webkitRequestFullscreen).call(box);
-  } else {
-    (document.exitFullscreen || document.webkitExitFullscreen).call(document);
-  }
+  const area = document.getElementById('preview-area');
+  _isFullscreen = !_isFullscreen;
+  area.classList.toggle('fullscreen', _isFullscreen);
+
+  const btn = document.getElementById('fullscreen-btn');
+  if (btn) btn.textContent = _isFullscreen ? '✕' : '⛶';
+
+  // Re-render PDF to fit the new size
+  setTimeout(() => { _pdfScale = null; applyPdfZoom(); }, 50);
 }
 
-// Update fullscreen button icon; re-render PDF after layout settles
-document.addEventListener('fullscreenchange', () => {
-  const btn = document.getElementById('fullscreen-btn');
-  if (btn) btn.textContent = document.fullscreenElement ? '✕' : '⛶';
-  setTimeout(() => {
-    _pdfScale = null; // reset to auto-fit
-    applyPdfZoom();
-  }, 150);
-});
+// Esc closes fake fullscreen
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && _isFullscreen) {
+    e.stopImmediatePropagation();
+    togglePreviewFullscreen();
+  }
+}, true);
 
 function toggleSelectionMode() {
   selectionMode = !selectionMode;
