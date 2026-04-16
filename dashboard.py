@@ -23,7 +23,7 @@ SUMMARIZE_SCRIPT = str(Path(__file__).parent / "summarize.py")
 SCRAPER_SCRIPT   = str(Path(__file__).parent / "scraper.py")
 PIPELINE_LOG     = str(Path(__file__).parent / "pipeline.log")
 OUTPUT_FILENAME  = "_zusammenfassung.md"
-SUMMARY_RE       = re.compile(r'^_zusammenfassung.*\.md$')
+SUMMARY_RE       = re.compile(r'^_zusammenfassung(?!.*_qa).*\.md$')
 NOTES_FILENAME      = "_notizen.md"
 FILE_NOTES_FILENAME  = "_file_notes.json"
 CUSTOM_INFO_FILENAME = "_custom_info.json"
@@ -86,18 +86,21 @@ def _course_info(rel_path: str, d: Path, progress: dict) -> dict:
     sync_mtime    = int(sync_path.read_text().strip()) if sync_path.exists() else None
     # Count files newer than the last sync
     new_files = 0
+    new_file_names = []
     if sync_mtime:
         for fname in files:
             fpath = d / fname
             if fpath.exists() and int(fpath.stat().st_mtime) > sync_mtime:
                 new_files += 1
+                new_file_names.append(fname)
     return {
-        "name":        d.name,
-        "path":        rel_path,
-        "has_summary": summary_path.exists(),
-        "has_notes":   notes_path.exists(),
-        "file_count":  len(files),
-        "new_files":   new_files,
+        "name":           d.name,
+        "path":           rel_path,
+        "has_summary":    summary_path.exists(),
+        "has_notes":      notes_path.exists(),
+        "file_count":     len(files),
+        "new_files":      new_files,
+        "new_file_names": new_file_names,
         "summary_age": summary_mtime,
         "sync_age":    sync_mtime,
         "progress":    {
@@ -200,16 +203,20 @@ def read_file_text(course_name: str, filename: str) -> str:
         return f"Fehler beim Lesen: {e}"
     return ""
 
-def parse_flashcards(summary_md: str) -> list[dict]:
-    """Extract Q&A pairs from summary markdown."""
+def get_qa_file(summary_path: Path) -> Path:
+    """Derive the _qa.md path from a summary path."""
+    return summary_path.parent / (summary_path.stem + "_qa.md")
+
+def parse_flashcards(qa_md: str) -> list[dict]:
+    """Extract Q&A pairs from a _qa.md file."""
     cards = []
-    sections = re.split(r'\n## ', summary_md)
+    sections = re.split(r'\n## ', qa_md)
     for section in sections:
         lines = section.strip().split('\n')
-        section_title = lines[0].strip('# ').strip() if lines else "Unbekannt"
+        section_title = lines[0].strip('# ').strip() if lines else "Unknown"
 
-        q_block = re.search(r'\*\*Trainingsfragen\*\*\s*\n(.*?)(?=\n\*\*|\Z)', section, re.DOTALL)
-        a_block = re.search(r'\*\*Antworten\*\*\s*\n(.*?)(?=\n\*\*|\Z)', section, re.DOTALL)
+        q_block = re.search(r'\*\*(?:Training Questions|Trainingsfragen)\*\*\s*\n(.*?)(?=\n\*\*|\Z)', section, re.DOTALL)
+        a_block = re.search(r'\*\*(?:Answers|Antworten)\*\*\s*\n(.*?)(?=\n\*\*|\Z)', section, re.DOTALL)
 
         if not q_block:
             continue
@@ -273,6 +280,25 @@ def api_summaries(course_name):
     d = COURSES_DIR / course_name
     return jsonify(list_summaries(d))
 
+def _protect_latex(md: str):
+    """Replace LaTeX blocks with placeholders so markdown2 can't mangle them."""
+    blocks: dict[str, str] = {}
+    counter = [0]
+    def store(m):
+        key = f"\x00LATEX{counter[0]}\x00"
+        blocks[key] = m.group(0)
+        counter[0] += 1
+        return key
+    # display math first ($$...$$), then inline ($...$)
+    md = re.sub(r'\$\$[\s\S]+?\$\$', store, md)
+    md = re.sub(r'\$[^$\n]+?\$', store, md)
+    return md, blocks
+
+def _restore_latex(html: str, blocks: dict) -> str:
+    for key, val in blocks.items():
+        html = html.replace(key, val)
+    return html
+
 @app.route("/api/summary/<path:course_name>")
 def api_summary(course_name):
     filename = request.args.get("file")
@@ -281,8 +307,56 @@ def api_summary(course_name):
     if not path or not path.exists():
         return jsonify({"html": None, "md": None})
     md   = path.read_text(encoding="utf-8")
-    html = markdown2.markdown(md, extras=["fenced-code-blocks", "tables"])
+    protected_md, latex_blocks = _protect_latex(md)
+    html = markdown2.markdown(protected_md, extras=["fenced-code-blocks", "tables"])
+    html = _restore_latex(html, latex_blocks)
     return jsonify({"html": html, "md": md, "file": path.name})
+
+@app.route("/api/summary-delete/<path:course_name>", methods=["POST"])
+def api_summary_delete(course_name):
+    filename = (request.json or {}).get("file")
+    if not filename:
+        return jsonify({"error": "No file specified"}), 400
+    p = COURSES_DIR / course_name / filename
+    if not p.exists() or not SUMMARY_RE.match(p.name):
+        return jsonify({"error": "File not found"}), 404
+    p.unlink()
+    return jsonify({"ok": True})
+
+@app.route("/api/summary-rename/<path:course_name>", methods=["POST"])
+def api_summary_rename(course_name):
+    body    = request.json or {}
+    old_name = body.get("file")
+    new_label = body.get("label", "").strip()
+    if not old_name or not new_label:
+        return jsonify({"error": "Missing params"}), 400
+    d = COURSES_DIR / course_name
+    old_p = d / old_name
+    if not old_p.exists() or not SUMMARY_RE.match(old_p.name):
+        return jsonify({"error": "File not found"}), 404
+    # Sanitise label → filename
+    safe = re.sub(r'[^\w\- ]', '', new_label).strip().replace(' ', '_')
+    if not safe:
+        return jsonify({"error": "Invalid name"}), 400
+    new_name = f"_zusammenfassung_{safe}.md"
+    new_p = d / new_name
+    if new_p.exists():
+        return jsonify({"error": "Name already in use"}), 409
+    old_p.rename(new_p)
+    return jsonify({"ok": True, "file": new_name})
+
+@app.route("/api/summary-save/<path:course_name>", methods=["POST"])
+def api_summary_save(course_name):
+    body     = request.json or {}
+    filename = body.get("file")
+    content  = body.get("content", "")
+    if not filename:
+        return jsonify({"error": "No file"}), 400
+    p = COURSES_DIR / course_name / filename
+    if not p.exists() or not SUMMARY_RE.match(p.name):
+        return jsonify({"error": "File not found"}), 404
+    p.write_text(content, encoding="utf-8")
+    return jsonify({"ok": True})
 
 @app.route("/api/summary-raw/<path:course_name>")
 def api_summary_raw(course_name):
@@ -295,23 +369,150 @@ def api_summary_raw(course_name):
 
 @app.route("/api/flashcards/<path:course_name>")
 def api_flashcards(course_name):
-    path = get_latest_summary(COURSES_DIR / course_name)
-    if not path or not path.exists():
+    summary = get_latest_summary(COURSES_DIR / course_name)
+    if not summary:
         return jsonify([])
-    md    = path.read_text(encoding="utf-8")
-    cards = parse_flashcards(md)
+    qa_path = get_qa_file(summary)
+    if not qa_path.exists():
+        return jsonify([])
+    cards = parse_flashcards(qa_path.read_text(encoding="utf-8"))
     return jsonify(cards)
 
 def _collect_flashcards(rel_path: str, d: Path) -> list:
     summary = get_latest_summary(d)
     if not summary or not summary.exists():
         return []
-    md = summary.read_text(encoding="utf-8")
-    cards = parse_flashcards(md)
+    qa_path = get_qa_file(summary)
+    if not qa_path.exists():
+        return []
+    cards = parse_flashcards(qa_path.read_text(encoding="utf-8"))
     for c in cards:
         c["course"] = d.name
         c["id"] = f"{rel_path}::{c['id']}"
     return cards
+
+CUSTOM_CARDS_FILE = "_custom_cards.json"
+
+@app.route("/api/custom-cards/<path:course_name>", methods=["GET"])
+def api_get_custom_cards(course_name):
+    p = COURSES_DIR / course_name / CUSTOM_CARDS_FILE
+    if not p.exists():
+        return jsonify([])
+    return jsonify(json.loads(p.read_text(encoding="utf-8")))
+
+@app.route("/api/custom-cards/<path:course_name>", methods=["POST"])
+def api_save_custom_cards(course_name):
+    cards = request.json
+    p = COURSES_DIR / course_name / CUSTOM_CARDS_FILE
+    p.write_text(json.dumps(cards, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"ok": True})
+
+@app.route("/api/srs/<path:course_name>", methods=["GET"])
+def api_get_srs(course_name):
+    p = COURSES_DIR / course_name / "_srs.json"
+    if not p.exists():
+        return jsonify({})
+    return jsonify(json.loads(p.read_text(encoding="utf-8")))
+
+@app.route("/api/srs/<path:course_name>", methods=["POST"])
+def api_save_srs(course_name):
+    p = COURSES_DIR / course_name / "_srs.json"
+    p.write_text(json.dumps(request.json, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"ok": True})
+
+@app.route("/api/generate-cards/<path:course_name>", methods=["POST"])
+def api_generate_cards(course_name):
+    course_dir   = COURSES_DIR / course_name
+    summary_path = get_latest_summary(course_dir)
+    if not summary_path or not summary_path.exists():
+        return jsonify({"error": "No summary found"}), 404
+    body  = request.json or {}
+    count = max(3, min(int(body.get("count", 10)), 30))
+    # Allow specifying a particular summary file
+    specific = body.get("file")
+    if specific:
+        sp = COURSES_DIR / course_name / specific
+        if sp.exists() and SUMMARY_RE.match(sp.name):
+            summary_path = sp
+    summary = summary_path.read_text(encoding="utf-8")[:12000]
+    prompt = f"""Create exactly {count} high-quality flashcards from the following course summary.
+
+Use a MIX of these card types (spread them across the content, don't cluster):
+- "recall"      — direct fact or definition: "What is X?" / "Define X."
+- "mechanism"   — cause, process, or reasoning: "Why does X happen?" / "How does X work?"
+- "contrast"    — comparison: "What is the difference between X and Y?"
+- "application" — applying a concept: "Given [scenario], what would [result/approach] be?"
+- "cloze"       — fill-in-the-blank: write a key sentence from the material with ONE important term replaced by ___ ; the answer is ONLY that missing term/phrase (keep it short).
+
+Target distribution: ~25% recall, ~25% mechanism, ~20% contrast, ~15% application, ~15% cloze.
+Avoid trivial or overly broad questions. Prefer specific, testable knowledge.
+
+LaTeX rules (apply to ALL types, both q and a):
+- Inline math: $...$ (e.g. $E = mc^2$, $\\alpha$, $\\nabla f$)
+- Block math: $$...$$ for standalone equations
+- Never write math as plain text.
+
+Reply ONLY as a JSON array, no explanation:
+[{{"type": "recall", "q": "...", "a": "..."}}, {{"type": "cloze", "q": "The ___ controls ...", "a": "missing term"}}, ...]
+
+Summary:
+{summary}"""
+
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    openai_key    = os.environ.get("OPENAI_API_KEY")
+
+    if anthropic_key:
+        import anthropic as _anthropic
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+        client = _anthropic.Anthropic(api_key=anthropic_key)
+        try:
+            msg = client.messages.create(
+                model=model, max_tokens=2000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except _anthropic.AuthenticationError:
+            return jsonify({"error": "❌ API key invalid — create a new key at https://console.anthropic.com"}), 401
+        except _anthropic.PermissionDeniedError:
+            return jsonify({"error": "❌ API key lacks permission — check your Anthropic account and plan."}), 403
+        except _anthropic.RateLimitError:
+            return jsonify({"error": "❌ Rate limit hit — too many requests. Wait a moment and try again."}), 429
+        except _anthropic.APIStatusError as e:
+            if e.status_code in (402, 403):
+                return jsonify({"error": f"❌ API quota exhausted or billing issue (HTTP {e.status_code}). Check https://console.anthropic.com"}), 402
+            return jsonify({"error": f"❌ Anthropic API error (HTTP {e.status_code}): {e.message}"}), 500
+        except _anthropic.APIConnectionError:
+            return jsonify({"error": "❌ Cannot reach Anthropic API — check your internet connection."}), 503
+        except _anthropic.APITimeoutError:
+            return jsonify({"error": "❌ Request timed out — the API took too long to respond."}), 504
+        raw = msg.content[0].text.strip()
+    elif openai_key:
+        from openai import OpenAI
+        model    = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        base_url = os.environ.get("OPENAI_BASE_URL") or None
+        client   = OpenAI(api_key=openai_key, base_url=base_url)
+        try:
+            resp = client.chat.completions.create(
+                model=model, max_tokens=2000,
+                messages=[{"role": "user", "content": prompt}],
+            )
+        except Exception as e:
+            err = str(e).lower()
+            if "401" in err or "authentication" in err:
+                return jsonify({"error": "❌ API key invalid — check OPENAI_API_KEY in your .env file."}), 401
+            elif "429" in err or "rate limit" in err:
+                return jsonify({"error": "❌ Rate limit hit — wait a moment and try again."}), 429
+            elif "402" in err or "quota" in err or "billing" in err or "insufficient_quota" in err:
+                return jsonify({"error": "❌ API quota exhausted or billing issue — check your account."}), 402
+            elif "connection" in err or "timeout" in err:
+                return jsonify({"error": "❌ Cannot reach API — check your internet connection."}), 503
+            return jsonify({"error": f"❌ API error: {e}"}), 500
+        raw = resp.choices[0].message.content.strip()
+    else:
+        return jsonify({"error": "❌ No API key configured — add ANTHROPIC_API_KEY or OPENAI_API_KEY to your .env file."}), 500
+
+    raw = re.sub(r'^```[a-z]*\n?', '', raw).rstrip('`').strip()
+    cards = json.loads(raw)
+    return jsonify(cards)
 
 @app.route("/api/all-flashcards")
 def api_all_flashcards():
@@ -425,15 +626,27 @@ def api_summarize():
     files    = data.get("files", [])
     lang     = data.get("lang", "en")
     new_file = data.get("new_file", False)
+    length   = data.get("length", "short")
 
     # Resolve to absolute path so nested courses (e.g. "Archiv/Machine Learning") work
     course_dir = COURSES_DIR / course
-    cmd = [PYTHON, SUMMARIZE_SCRIPT, "--dir", str(course_dir), "--limit", str(limit), "--lang", lang]
+    cmd = [PYTHON, SUMMARIZE_SCRIPT, "--dir", str(course_dir), "--limit", str(limit), "--lang", lang, "--length", length]
     if force:
         cmd.append("--force")
     if new_file:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        cmd += ["--out", f"_zusammenfassung_{ts}.md", "--force"]
+        # Find next available number: _zusammenfassung.md = 1, _zusammenfassung_2.md = 2, …
+        existing = list_summaries(course_dir)
+        nums = []
+        for s in existing:
+            if s["name"] == "_zusammenfassung.md":
+                nums.append(1)
+            else:
+                m = re.match(r'^_zusammenfassung_(\d+)\.md$', s["name"])
+                if m:
+                    nums.append(int(m.group(1)))
+        next_num = max(nums, default=0) + 1
+        out_name = "_zusammenfassung.md" if next_num == 1 else f"_zusammenfassung_{next_num}.md"
+        cmd += ["--out", out_name, "--force"]
     if files:
         cmd += ["--files"] + files
 
@@ -972,6 +1185,19 @@ body {
   color: var(--text2); border-color: var(--border2); background: var(--bg4);
 }
 
+/* Credits footer at sidebar bottom */
+#sidebar-credits {
+  flex-shrink: 0; padding: 6px 12px 10px;
+  font-size: 10px; color: var(--text3); text-align: center;
+  opacity: 0.45; letter-spacing: 0.01em; line-height: 1.5;
+}
+#sidebar-credits a {
+  color: var(--text3); text-decoration: none; font-weight: 500;
+  transition: color var(--transition);
+}
+#sidebar-credits a:hover { color: var(--blue); }
+#sidebar.collapsed #sidebar-credits { display: none; }
+
 /* ── Resize divider ── */
 .resize-divider {
   width: 5px; background: transparent; cursor: col-resize;
@@ -1137,7 +1363,7 @@ body {
 /* To-do widget */
 .todo-widget {
   background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
-  padding: 14px 18px; margin-bottom: 24px;
+  padding: 14px 18px; margin-bottom: 24px; max-width: 700px;
 }
 .todo-widget-header {
   display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
@@ -1441,16 +1667,49 @@ body {
   display: flex; align-items: center; gap: 8px; margin-bottom: 24px;
   padding-bottom: 18px; border-bottom: 1px solid var(--border); flex-wrap: wrap;
 }
+.summary-file-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 20px; padding: 3px 10px 3px 12px;
+  font-size: 11px; color: var(--text3); cursor: pointer;
+  transition: border-color var(--transition), color var(--transition);
+}
+.summary-file-pill:hover, .summary-file-pill.active {
+  border-color: var(--blue); color: var(--text);
+}
+.summary-file-pill.active { background: rgba(91,142,240,.1); color: var(--blue); }
+.summary-pill-del {
+  background: none; border: none; cursor: pointer; color: var(--text3);
+  padding: 0 0 0 2px; font-size: 11px; line-height: 1;
+  transition: color var(--transition);
+}
+.summary-pill-del:hover { color: var(--red); }
+.summary-pill-rename {
+  background: none; border: none; cursor: pointer; color: var(--text3);
+  padding: 0; font-size: 10px; line-height: 1;
+  transition: color var(--transition);
+}
+.summary-pill-rename:hover { color: var(--blue); }
+#summary-editor {
+  width: 100%; box-sizing: border-box; flex: 1; min-height: 400px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text); font-size: 13px; font-family: "SF Mono", "Fira Code", monospace;
+  line-height: 1.7; padding: 16px; resize: vertical;
+  transition: border-color var(--transition);
+}
+#summary-editor:focus { outline: none; border-color: var(--blue); }
 .md-content { max-width: 820px; }
 .md-content h1 { font-size: 24px; color: var(--text); margin-bottom: 8px; line-height: 1.25; font-weight: 800; letter-spacing: -.02em; }
 .md-content h2 { font-size: 17px; color: #93c5fd; margin: 32px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); font-weight: 700; }
 .md-content h3 { font-size: 14px; color: #a5b4fc; margin: 20px 0 8px; font-weight: 600; }
-.md-content p  { color: var(--text2); line-height: 1.8; margin-bottom: 12px; }
-.md-content ul, .md-content ol { color: var(--text2); line-height: 1.8; margin: 6px 0 14px 24px; }
-.md-content li { margin-bottom: 5px; }
-.md-content strong { color: var(--text); }
+.md-content p  { color: var(--text2); line-height: 1.9; margin-bottom: 18px; text-align: justify; hyphens: auto; }
+.md-content ul, .md-content ol { color: var(--text2); line-height: 1.9; margin: 8px 0 20px 24px; text-align: justify; hyphens: auto; }
+.md-content li { margin-bottom: 8px; }
+.md-content strong { color: #93c5fd; font-weight: 700; }
 .md-content em { color: var(--text3); }
-.md-content hr { border: none; border-top: 1px solid var(--border); margin: 24px 0; }
+.md-content hr { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+.md-content .katex-display { margin: 22px 0; overflow-x: auto; }
+.md-content .katex { font-size: 1.05em; }
 .md-content code { background: var(--bg3); padding: 2px 7px; border-radius: 5px; font-size: 12px; color: #6ee7b7; font-family: "SF Mono", monospace; border: 1px solid var(--border); }
 .md-content blockquote { border-left: 3px solid var(--blue); padding: 8px 16px; color: var(--text3); margin: 14px 0; background: rgba(79,142,247,.05); border-radius: 0 var(--radius) var(--radius) 0; }
 .md-content table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13px; border-radius: var(--radius); overflow: hidden; }
@@ -1516,11 +1775,104 @@ body {
 .flash-done h2 { font-size: 24px; color: var(--text); font-weight: 800; }
 .flash-done p  { color: var(--text3); font-size: 14px; line-height: 1.6; }
 
+/* Manage-cards view */
+.manage-cards-wrap { max-width: 700px; margin: 0 auto; }
+.manage-cards-header { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+.manage-cards-header h2 { font-size: 16px; font-weight: 700; color: var(--text); flex: 1; margin: 0; }
+.mc-add-form {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  padding: 16px 18px; margin-bottom: 20px; display: flex; flex-direction: column; gap: 10px;
+}
+.mc-add-form textarea {
+  width: 100%; resize: vertical; background: var(--bg3); border: 1px solid var(--border);
+  border-radius: var(--radius); color: var(--text); font-size: 13px; padding: 8px 10px;
+  font-family: inherit; min-height: 52px; box-sizing: border-box;
+  transition: border-color var(--transition);
+}
+.mc-add-form textarea:focus { outline: none; border-color: var(--border2); }
+.mc-add-form textarea::placeholder { color: var(--text3); }
+.mc-add-row { display: flex; gap: 8px; align-items: flex-end; }
+.mc-list { display: flex; flex-direction: column; gap: 8px; }
+.mc-card {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 12px 14px; display: flex; gap: 12px; align-items: flex-start;
+}
+.mc-card-body { flex: 1; min-width: 0; }
+.mc-card-q { font-size: 13px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
+.mc-card-a {
+  font-size: 12px; color: transparent; background: var(--bg3);
+  border-radius: 3px; cursor: pointer; user-select: none;
+  transition: color .15s, background .15s;
+}
+.mc-card-a:hover { color: var(--text3); background: transparent; }
+.mc-card-del { background: none; border: none; color: var(--text3); cursor: pointer; font-size: 14px; padding: 2px 4px; flex-shrink: 0; }
+.mc-card-del:hover { color: var(--red); }
+.card-type-badge { font-size: 9px; text-transform: uppercase; letter-spacing: .09em; padding: 2px 7px; border-radius: 10px; font-weight: 700; display: inline-block; margin-bottom: 5px; }
+.ct-recall      { color: #93c5fd; background: rgba(147,197,253,.1); border: 1px solid rgba(147,197,253,.2); }
+.ct-mechanism   { color: #c4b5fd; background: rgba(196,181,253,.1); border: 1px solid rgba(196,181,253,.2); }
+.ct-contrast    { color: #fdba74; background: rgba(253,186,116,.1); border: 1px solid rgba(253,186,116,.2); }
+.ct-application { color: #6ee7b7; background: rgba(110,231,183,.1); border: 1px solid rgba(110,231,183,.2); }
+.ct-cloze       { color: #67e8f9; background: rgba(103,232,249,.1); border: 1px solid rgba(103,232,249,.2); }
+.cloze-blank { display: inline-block; min-width: 90px; height: 1.1em; border-bottom: 2px solid var(--blue); background: rgba(79,142,247,.08); border-radius: 3px 3px 0 0; margin: 0 3px; vertical-align: middle; }
+.cloze-fill  { color: var(--blue); font-weight: 700; border-bottom: 2px solid var(--blue); padding: 0 3px; }
+.mc-section-label { font-size: 11px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: .06em; margin: 16px 0 8px; }
+.mc-gen-section {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: var(--radius-lg); padding: 14px 16px; margin-bottom: 14px;
+}
+.mc-gen-section-disabled { opacity: 0.5; font-size: 13px; color: var(--text3); gap: 10px; }
+.mc-gen-info { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 0; }
+.mc-gen-icon { font-size: 22px; flex-shrink: 0; }
+.mc-gen-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.mc-gen-desc { font-size: 11px; color: var(--text3); margin-top: 2px; }
+
 .flash-kbd-hint { text-align: center; font-size: 11px; color: var(--text3); margin-top: 10px; }
 .flash-kbd-hint kbd {
   background: var(--bg3); border: 1px solid var(--border2); border-radius: 5px;
   padding: 2px 6px; font-size: 10px; font-family: "SF Mono", monospace; color: var(--text2);
 }
+
+/* ── SRS Study System ── */
+.srs-overview { max-width: 700px; margin: 0 auto; padding: 4px 0; }
+.srs-overview-header { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+.srs-overview-header h2 { font-size: 18px; font-weight: 700; color: var(--text); flex: 1; margin: 0; }
+.srs-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 16px; }
+.srs-stat { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 10px; text-align: center; }
+.srs-stat-num { font-size: 30px; font-weight: 800; line-height: 1; margin-bottom: 5px; }
+.srs-stat-label { font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: .06em; }
+.srs-stat-due .srs-stat-num { color: var(--yellow); }
+.srs-stat-new .srs-stat-num { color: var(--blue); }
+.srs-stat-learning .srs-stat-num { color: var(--orange); }
+.srs-stat-mastered .srs-stat-num { color: var(--purple); }
+.srs-action-btns { display: flex; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; }
+.srs-badge { display: inline-flex; align-items: center; font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; padding: 2px 7px; border-radius: 10px; }
+.srs-badge-new      { background: rgba(91,142,240,.15);  color: var(--blue);   }
+.srs-badge-due      { background: rgba(251,191,36,.15);  color: var(--yellow); }
+.srs-badge-overdue  { background: rgba(248,113,113,.18); color: var(--red);    }
+.srs-badge-learning { background: rgba(251,146,60,.15);  color: var(--orange); }
+.srs-badge-review   { background: rgba(52,211,153,.12);  color: var(--green);  }
+.srs-badge-mastered { background: rgba(167,139,250,.15); color: var(--purple); }
+.rating-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 16px; }
+.rb { border: 1px solid transparent; border-radius: var(--radius); padding: 12px 6px 10px; cursor: pointer; font-size: 13px; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 5px; transition: opacity .12s, transform .1s; }
+.rb:hover { opacity: .85; transform: translateY(-1px); }
+.rb:active { transform: scale(.97); }
+.rb-label { font-size: 13px; font-weight: 600; }
+.rb-hint  { font-size: 10px; opacity: .6; background: rgba(0,0,0,.12); padding: 1px 6px; border-radius: 3px; font-family: "SF Mono", monospace; }
+.rb-again { background: rgba(248,113,113,.15); color: var(--red);    border-color: rgba(248,113,113,.3); }
+.rb-hard  { background: rgba(251,146,60,.15);  color: var(--orange); border-color: rgba(251,146,60,.3);  }
+.rb-good  { background: rgba(91,142,240,.15);  color: var(--blue);   border-color: rgba(91,142,240,.3);  }
+.rb-easy  { background: rgba(52,211,153,.15);  color: var(--green);  border-color: rgba(52,211,153,.3);  }
+.srs-summary { max-width: 700px; margin: 0 auto; text-align: center; padding: 8px 0; }
+.srs-summary h2 { font-size: 24px; font-weight: 800; color: var(--text); margin: 0 0 6px; }
+.srs-summary-sub { font-size: 13px; color: var(--text3); margin-bottom: 22px; }
+.srs-rating-breakdown { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 20px; }
+.srb-item { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 14px 8px; }
+.srb-num { font-size: 26px; font-weight: 800; line-height: 1; margin-bottom: 4px; }
+.srb-label { font-size: 11px; color: var(--text3); }
+.srs-next-due { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 12px 16px; margin-bottom: 18px; text-align: left; font-size: 13px; color: var(--text2); }
+.srs-next-due-title { font-size: 10px; font-weight: 700; color: var(--text3); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
+@media (max-width: 500px) { .srs-stats, .rating-grid, .srs-rating-breakdown { grid-template-columns: repeat(2, 1fr); } }
 
 /* Notes panel (course-level) */
 .notes-panel { display: flex; flex-direction: column; height: calc(100vh - 158px); }
@@ -1800,28 +2152,30 @@ body {
 .chat-suggestion:hover { border-color: var(--blue); color: var(--text2); background: var(--bg4); transform: translateY(-1px); }
 
 /* Recommendations */
-.rec-list { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 28px; }
-.rec-card {
-  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius);
-  padding: 13px 16px; cursor: pointer;
-  transition: border-color var(--transition), transform var(--transition), box-shadow var(--transition);
-  flex: 1; min-width: 180px; display: flex; flex-direction: column; gap: 5px;
-  border-left: 3px solid var(--accent, var(--border));
-}
-.rec-card:hover { border-color: var(--blue); transform: translateY(-2px); box-shadow: var(--shadow); }
-.rec-card-reason { font-size: 9px; color: var(--text3); text-transform: uppercase; letter-spacing: .08em; font-weight: 700; }
-.rec-card-name { font-size: 13px; color: var(--text); font-weight: 600; }
-.rec-card-meta { font-size: 11px; color: var(--text3); }
 
 /* Sync tile */
 #sync-tile {
-  display: inline-flex; align-items: center; gap: 6px;
+  display: inline-flex; flex-direction: column; gap: 0;
   font-size: 11px; color: var(--text3);
   background: var(--bg2); border: 1px solid var(--border);
-  border-radius: 20px; padding: 3px 10px; margin-bottom: 18px;
+  border-radius: 10px; padding: 6px 12px; margin-bottom: 18px;
 }
+#sync-tile-header { display: flex; align-items: center; gap: 6px; }
 #sync-tile .sync-dot {
   width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex-shrink: 0;
+}
+#sync-tile-files {
+  margin-top: 6px; display: flex; flex-direction: column; gap: 2px;
+  border-top: 1px solid var(--border); padding-top: 6px;
+}
+#sync-tile-files .sync-file {
+  display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--text2);
+}
+#sync-tile-files .sync-file-course {
+  color: var(--text3); flex-shrink: 0;
+}
+#sync-tile-files .sync-file-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
 /* Courses overview */
@@ -1929,6 +2283,51 @@ body {
 .summary-content-wrap { flex: 1; min-width: 0; }
 @media (max-width: 960px) { .summary-toc { display: none; } }
 
+/* ── Welcome modal ── */
+#welcome-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(0,0,0,.55); backdrop-filter: blur(6px);
+  display: flex; align-items: center; justify-content: center;
+  animation: fadeIn .25s ease;
+}
+#welcome-overlay.hidden { display: none; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+#welcome-modal {
+  background: var(--bg2); border: 1px solid var(--border2);
+  border-radius: 18px; padding: 40px 44px 36px;
+  max-width: 480px; width: calc(100% - 40px);
+  box-shadow: 0 24px 64px rgba(0,0,0,.35);
+  animation: slideUp .28s cubic-bezier(.22,1,.36,1);
+}
+@keyframes slideUp { from { transform: translateY(18px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+#welcome-modal .welcome-from {
+  font-size: 11px; color: var(--text3); margin: 0 0 10px;
+  text-transform: uppercase; letter-spacing: .07em;
+}
+#welcome-modal h1 {
+  font-size: 21px; font-weight: 700; color: var(--text1);
+  margin: 0 0 18px; letter-spacing: -.01em; line-height: 1.25;
+}
+#welcome-modal .welcome-body {
+  font-size: 14px; color: var(--text2); line-height: 1.7;
+  margin: 0 0 28px;
+}
+#welcome-modal .welcome-btn {
+  width: 100%; padding: 11px; font-size: 14px; font-weight: 600;
+  background: var(--blue); color: #fff; border: none;
+  border-radius: var(--radius-lg); cursor: pointer;
+  transition: background var(--transition);
+}
+#welcome-modal .welcome-btn:hover { background: var(--blue2); }
+#welcome-modal .welcome-footer {
+  margin-top: 14px; text-align: center;
+  font-size: 11px; color: var(--text3);
+}
+#welcome-modal .welcome-footer a {
+  color: var(--text3); text-decoration: none;
+}
+#welcome-modal .welcome-footer a:hover { color: var(--blue); }
+
 /* ── Selection toolbar ── */
 #selection-toolbar {
   background: rgba(79,142,247,.07); border: 1px solid rgba(79,142,247,.25);
@@ -1939,6 +2338,10 @@ body {
 #sel-count { font-size: 11px; color: var(--blue); font-weight: 600; }
 .sel-toolbar-btns { display: flex; gap: 5px; }
 </style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+  onload="window._katexReady=true"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
 </head>
@@ -1955,6 +2358,23 @@ body {
   <button class="tbtn btn-gray topbar-shortcuts" onclick="showShortcuts()" title="Keyboard shortcuts (?)">⌨️</button>
   <button class="tbtn btn-gray" id="theme-toggle-btn" onclick="toggleTheme()" title="Toggle light/dark">🌙</button>
   <button class="tbtn btn-blue" id="scrape-btn" onclick="runScraper()">↓<span class="tbtn-label"> Sync</span></button>
+</div>
+
+<!-- Welcome modal (shown once) -->
+<div id="welcome-overlay" class="hidden">
+  <div id="welcome-modal">
+    <p class="welcome-from">by Max (Coxi)</p>
+    <h1>Hey, glad you're using it&nbsp;:)</h1>
+    <p class="welcome-body">
+      I built this because Stud.IP was driving me crazy —
+      slow as hell, everything hidden, nothing in one place.<br><br>
+      Here you get all your course files, notes, todos,
+      AI summaries and flashcards. Runs completely locally,
+      nothing leaves your machine.<br><br>
+      Good luck this semester ✌️
+    </p>
+    <button class="welcome-btn" onclick="closeWelcome()">Thanks, let's go</button>
+  </div>
 </div>
 
 <!-- Mobile sidebar backdrop -->
@@ -1976,21 +2396,20 @@ body {
       <input id="sidebar-search" type="text" placeholder="Search courses…" oninput="filterAndRenderSidebar()">
       <div class="filter-pills">
         <button class="pill active" data-filter="all"       onclick="setFilter('all')">All</button>
-        <button class="pill"        data-filter="summary"   onclick="setFilter('summary')">✓ Summary</button>
-        <button class="pill"        data-filter="nosummary" onclick="setFilter('nosummary')">✗ Open</button>
         <button class="pill"        data-filter="fav"       onclick="setFilter('fav')">⭐ Favourites</button>
       </div>
       <div class="sort-row">
         <label>Sort:</label>
         <select class="sort-select" onchange="setSortAndRender(this.value)">
           <option value="name">Name</option>
-          <option value="files">Files</option>
-          <option value="progress">Progress</option>
-          <option value="recent">Last updated</option>
+          <option value="files">File count</option>
+          <option value="progress">Learn progress</option>
+          <option value="recent">Last synced</option>
         </select>
       </div>
     </div>
     <div id="course-list"></div>
+    <div id="sidebar-credits">Built by <a href="https://maximilianherrmann.com" target="_blank" rel="noopener">Max (Coxi) Herrmann</a> &mdash; free to use</div>
   </div>
 
   <!-- Sidebar / Main resize divider -->
@@ -2012,7 +2431,7 @@ body {
       <button class="tab active" data-tab="files"   onclick="switchTab('files')">📁 Files</button>
       <button class="tab"        data-tab="info"    onclick="switchTab('info')">ℹ️ Info</button>
       <button class="tab"        data-tab="summary" onclick="switchTab('summary')">📄 Summary</button>
-      <button class="tab"        data-tab="learn"   onclick="switchTab('learn')">🧠 Learn</button>
+      <button class="tab"        data-tab="learn"   onclick="switchTab('learn')">🧠 Study</button>
       <button class="tab"        data-tab="notes"   onclick="switchTab('notes')">✏️ Notes</button>
       <button class="tab"        data-tab="chat"    onclick="switchTab('chat')">💬 Chat</button>
       <div class="tab-spacer"></div>
@@ -2024,7 +2443,6 @@ body {
 
       <!-- Home -->
       <div class="panel active" id="panel-home">
-        <div id="recommendations-wrap"></div>
         <div id="sync-tile"></div>
         <!-- Sticky notes pinboard -->
         <div class="section-title" style="margin-bottom:12px">Pinboard</div>
@@ -2091,28 +2509,23 @@ body {
               <div id="selection-toolbar">
                 <span id="sel-count">0 selected</span>
                 <div class="sel-toolbar-btns">
+                  <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="selectAllFiles()">All</button>
+                  <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="selectNoFiles()">None</button>
+                </div>
+                <div class="sel-toolbar-btns">
                   <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markSelectedFilesRead(true)">✓ Read</button>
                   <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markSelectedFilesRead(false)">↺ Unread</button>
                 </div>
-                <button class="tbtn btn-blue" id="sel-summarize-btn" style="width:100%;font-size:11px" onclick="generateSummary(false)">Summarize selected</button>
+                <div style="display:flex;gap:4px;align-items:center;margin-bottom:4px">
+                  <span style="font-size:10px;color:var(--text3);flex:1">Length</span>
+                  <button id="sum-len-short" class="tbtn btn-blue" style="font-size:10px;padding:2px 10px" onclick="setSummaryLength('short')">Short</button>
+                  <button id="sum-len-long"  class="tbtn btn-gray" style="font-size:10px;padding:2px 10px" onclick="setSummaryLength('long')">Long</button>
+                </div>
+                <button class="tbtn btn-blue" id="sel-summarize-btn" style="width:100%;font-size:11px" onclick="generateSummary()">Summarize</button>
               </div>
               <div id="bulk-read-row" style="display:flex;gap:6px;margin-bottom:4px">
                 <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markAllFilesRead(true)">✓ All read</button>
                 <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markAllFilesRead(false)">↺ All unread</button>
-              </div>
-              <button onclick="var o=this.classList.toggle('open');this.nextElementSibling.style.display=o?'block':'none';this.querySelector('.tog-arrow').textContent=o?'▾':'▶'"
-                style="width:100%;text-align:left;background:none;border:1px solid var(--border);border-radius:6px;padding:4px 8px;cursor:pointer;color:var(--text3);font-size:11px;margin-top:2px;transition:color .15s,border-color .15s"
-                onmouseover="this.style.color='var(--text)';this.style.borderColor='var(--blue)'"
-                onmouseout="this.style.color='var(--text3)';this.style.borderColor='var(--border)'">
-                <span class="tog-arrow">▶</span> Zusammenfassung erstellen
-              </button>
-              <div style="display:none;padding-top:4px">
-                <div class="limit-row">
-                  Max. files: <input class="limit-input" id="limit-input" type="number" value="3" min="1" max="50">
-                </div>
-                <button class="tbtn btn-blue"  style="width:100%" onclick="generateSummary(false)">Summarize</button>
-                <button class="tbtn btn-gray"  style="width:100%" onclick="generateSummary(false, true)">➕ Create another</button>
-                <button class="tbtn btn-gray"  style="width:100%;opacity:.7" onclick="generateSummary(true)">↺ Overwrite</button>
               </div>
             </div>
           </div>
@@ -2250,7 +2663,7 @@ body {
     <div class="shortcuts-section">Navigation</div>
     <div class="shortcut-row"><kbd>1</kbd>          <span class="shortcut-desc">Files tab</span></div>
     <div class="shortcut-row"><kbd>2</kbd>          <span class="shortcut-desc">Summary tab</span></div>
-    <div class="shortcut-row"><kbd>3</kbd>          <span class="shortcut-desc">Learn tab</span></div>
+    <div class="shortcut-row"><kbd>3</kbd>          <span class="shortcut-desc">Study tab</span></div>
     <div class="shortcut-row"><kbd>4</kbd>          <span class="shortcut-desc">Notes tab</span></div>
     <div class="shortcut-row"><kbd>N</kbd>          <span class="shortcut-desc">Toggle file notes</span></div>
     <div class="shortcut-row"><kbd>5</kbd>          <span class="shortcut-desc">Chat tab</span></div>
@@ -3085,27 +3498,6 @@ function todoUnlinkCourse(i) {
 // Home
 // ═══════════════════════════════════════════════════════════════════════════
 function renderHome(courses) {
-  // Recommendations — only from the current (newest) semester
-  const currentSem = courseTree.find(item => item.is_semester);
-  const currentSemCourses = currentSem
-    ? courses.filter(c => c.path.startsWith(currentSem.name + '/'))
-    : courses;
-  const recs = buildRecommendations(currentSemCourses);
-  const recWrap = document.getElementById('recommendations-wrap');
-  if (recs.length) {
-    recWrap.innerHTML = `
-      <div class="section-title" style="margin-bottom:10px">🎯 Empfohlen</div>
-      <div class="rec-list">${recs.map(r => `
-        <div class="rec-card" data-course="${esc(r.path)}" onclick="selectCourseFromEl(this)" style="--accent:${r.accent||'var(--border2)'}">
-          <div class="rec-card-reason">${esc(r.reason)}</div>
-          <div class="rec-card-name">${esc(r.name)}</div>
-          <div class="rec-card-meta">${esc(r.meta)}</div>
-        </div>`).join('')}
-      </div>`;
-  } else {
-    recWrap.innerHTML = '';
-  }
-
   // Sync tile — prefer per-course _last_sync, fall back to courses.json mtime
   const lastSync = Math.max(0, ...courses.map(c => c.sync_age || 0)) || _lastSyncGlobal || 0;
   const syncTile = document.getElementById('sync-tile');
@@ -3118,7 +3510,32 @@ function renderHome(courses) {
       else if (diff < 3600)    label = `${Math.floor(diff/60)}m ago`;
       else if (diff < 86400)   label = `${Math.floor(diff/3600)}h ago`;
       else                     label = `${Math.floor(diff/86400)}d ago`;
-      syncTile.innerHTML = `<span class="sync-dot"></span>Last sync: ${label}`;
+
+      // Collect all newly downloaded files across courses
+      const newItems = [];
+      for (const c of courses) {
+        if (c.new_file_names && c.new_file_names.length) {
+          for (const f of c.new_file_names) {
+            newItems.push({ course: c.name, file: f, path: c.path });
+          }
+        }
+      }
+      const MAX_SHOWN = 8;
+      let filesHtml = '';
+      if (newItems.length) {
+        const shown = newItems.slice(0, MAX_SHOWN);
+        filesHtml = `<div id="sync-tile-files">` +
+          shown.map(item => `
+            <div class="sync-file" onclick="selectCourse('${esc(item.path)}')" style="cursor:pointer" title="${esc(item.course)}">
+              <span class="sync-file-course">${esc(item.course.split('/').pop())}</span>
+              <span style="color:var(--border2)">›</span>
+              <span class="sync-file-name">${esc(item.file)}</span>
+            </div>`).join('') +
+          (newItems.length > MAX_SHOWN ? `<div style="font-size:10px;color:var(--text3);margin-top:2px">+${newItems.length - MAX_SHOWN} more</div>` : '') +
+          `</div>`;
+      }
+
+      syncTile.innerHTML = `<div id="sync-tile-header"><span class="sync-dot"></span>Last sync: ${label}${newItems.length ? ` &middot; <span style="color:var(--blue)">${newItems.length} new file${newItems.length > 1 ? 's' : ''}</span>` : ''}</div>${filesHtml}`;
       syncTile.style.display = '';
     } else {
       syncTile.style.display = 'none';
@@ -3279,6 +3696,7 @@ function switchTab(tab) {
   showPanel(tab);
   if (tab === 'files') _updateSummarizeBtn();
 
+  if (tab === 'files')   loadFiles();
   if (tab === 'info')    loadInfo();
   if (tab === 'summary') loadSummary();
   if (tab === 'learn')   loadFlashcards();
@@ -3978,6 +4396,11 @@ document.addEventListener('keydown', e => {
   }
 }, true);
 
+function startSummaryFlow() {
+  if (!selectionMode) toggleSelectionMode();
+  toast('Select files, then click Summarize.', '');
+}
+
 function toggleSelectionMode() {
   selectionMode = !selectionMode;
   const list    = document.getElementById('file-list');
@@ -3988,12 +4411,13 @@ function toggleSelectionMode() {
   if (selectionMode) {
     btn.style.color = 'var(--blue)';
     btn.style.borderColor = 'var(--blue)';
-    btn.textContent = 'Fertig';
-    allFilesChecked = true;
-    document.querySelectorAll('input[name="file"]').forEach(cb => cb.checked = true);
+    btn.textContent = 'Done';
+    allFilesChecked = false;
+    document.querySelectorAll('input[name="file"]').forEach(cb => cb.checked = false);
     toolbar.classList.add('visible');
     if (bulkRow) bulkRow.style.display = 'none';
     updateSelectionToolbar();
+    setSummaryLength(localStorage.getItem('summary_length') || 'short');
   } else {
     btn.style.color = 'var(--text3)';
     btn.style.borderColor = 'var(--border)';
@@ -4007,6 +4431,18 @@ function toggleSelectionMode() {
 function toggleAllFiles() {
   allFilesChecked = !allFilesChecked;
   document.querySelectorAll('input[name="file"]').forEach(cb => cb.checked = allFilesChecked);
+}
+
+function selectAllFiles() {
+  allFilesChecked = true;
+  document.querySelectorAll('input[name="file"]').forEach(cb => cb.checked = true);
+  updateSelectionToolbar();
+}
+
+function selectNoFiles() {
+  allFilesChecked = false;
+  document.querySelectorAll('input[name="file"]').forEach(cb => cb.checked = false);
+  updateSelectionToolbar();
 }
 
 function getSelectedFiles() {
@@ -4120,84 +4556,140 @@ function customInfoSave() {
 // ═══════════════════════════════════════════════════════════════════════════
 // Summary tab
 // ═══════════════════════════════════════════════════════════════════════════
+let _summaryEditMode = false;
+let _summaryActiveFile = null;
+
+function summaryLabel(name) {
+  if (name === '_zusammenfassung.md') return 'Summary 1';
+  const m = name.match(/^_zusammenfassung_(\d+)\.md$/);
+  if (m) return `Summary ${m[1]}`;
+  // fallback for renamed/custom filenames
+  return name.replace('_zusammenfassung_', '').replace('.md', '');
+}
+
 async function loadSummary(filename = null) {
+  _summaryEditMode = false;
   const [summaries, data] = await Promise.all([
     fetch(`/api/summaries/${enc(activeCourse)}`).then(r => r.json()),
-    fetch(`/api/summary/${enc(activeCourse)}${filename ? '?file=' + enc(filename) : ''}`).then(r => r.json()),
+    fetch(`/api/summary/${enc(activeCourse)}${filename ? '?file='+enc(filename) : ''}`).then(r => r.json()),
   ]);
+  _summaryActiveFile = data.file || null;
   const el = document.getElementById('summary-body');
-  if (data.html) {
-    const activeFile = data.file || '';
-    const pickerHtml = summaries.length > 1 ? `
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
-        ${summaries.map(s => {
-          const label = s.name === '_zusammenfassung.md' ? 'Original' : s.name.replace('_zusammenfassung_','').replace('.md','');
-          const active = s.name === activeFile;
-          return `<button class="tbtn ${active ? 'btn-blue' : 'btn-gray'}" style="font-size:11px;padding:4px 10px"
-            onclick="loadSummary('${s.name}')">${label}</button>`;
-        }).join('')}
-      </div>` : '';
-    el.innerHTML = `
-      <div class="summary-layout" id="summary-layout">
-        <div class="summary-content-wrap">
-          <div class="summary-toolbar">
-            <div style="flex:1;min-width:0">
-              ${pickerHtml}
-            </div>
-            <button class="tbtn btn-gray" onclick="copyToClipboard(summaryMD)" title="Markdown kopieren">📋 Kopieren</button>
-            <a class="tbtn btn-gray" href="/api/summary-raw/${enc(activeCourse)}?file=${enc(activeFile)}" download style="text-decoration:none">⬇ Download</a>
-            <button class="tbtn btn-gray" onclick="switchTab('files')">Neu erstellen</button>
-          </div>
-          <div class="md-content" id="summary-md-content">${data.html}</div>
-        </div>
-      </div>`;
-    window.summaryMD = data.md;
-    _buildAndInjectToC();
-  } else {
+
+  if (!data.html) {
     el.innerHTML = `
       <div class="empty-state">
         <div class="icon">📄</div>
         <h3>No summary yet</h3>
-        <p>Go to "Files", select files and click "Summarize"</p>
+        <p style="max-width:340px;margin:0 auto 20px;line-height:1.7;color:var(--text3)">
+          To create a summary, go to <strong style="color:var(--text2)">Files</strong>, click
+          <strong style="color:var(--text2)">Select</strong> to enter selection mode,
+          tick the files you want included, then hit
+          <strong style="color:var(--text2)">Create Summary</strong>.
+        </p>
         <button class="tbtn btn-blue" onclick="switchTab('files')">Go to Files →</button>
       </div>`;
-  }
-}
-
-function _updateSummarizeBtn() {
-  const course = allCourses.find(c => c.path === activeCourse);
-  const btn = document.querySelector('[onclick="generateSummary(false)"]');
-  if (!btn) return;
-  if (course?.has_summary) {
-    btn.textContent = '→ View summary';
-    btn.className = 'tbtn btn-gray';
-    btn.style.width = '100%';
-    btn.onclick = () => switchTab('summary');
-  } else {
-    btn.textContent = 'Summarize';
-    btn.className = 'tbtn btn-blue';
-    btn.style.width = '100%';
-    btn.onclick = () => generateSummary(false);
-  }
-}
-
-async function generateSummary(force, newFile = false) {
-  const course = allCourses.find(c => c.path === activeCourse);
-  // "Zusammenfassen" (force=false, newFile=false) with existing summary → do nothing
-  if (!force && !newFile && course?.has_summary) {
-    toast('Summary already exists — use "➕ Create another" or "↺ Overwrite".', '');
     return;
   }
-  const files = getSelectedFiles();
-  const limit = parseInt(document.getElementById('limit-input').value) || 3;
-  const lang  = localStorage.getItem('summary_lang') || 'en';
+
+  const pillsHtml = summaries.map(s => {
+    const label  = summaryLabel(s.name);
+    const active = s.name === _summaryActiveFile;
+    return `<span class="summary-file-pill ${active?'active':''}" onclick="loadSummary('${esc(s.name)}')">
+      ${esc(label)}
+      <button class="summary-pill-rename" onclick="event.stopPropagation();_summaryRename('${esc(s.name)}','${esc(label)}')" title="Rename">✎</button>
+      <button class="summary-pill-del"    onclick="event.stopPropagation();_summaryDelete('${esc(s.name)}')" title="Delete">✕</button>
+    </span>`;
+  }).join('');
+
+  el.innerHTML = `
+    <div class="summary-layout" id="summary-layout">
+      <div class="summary-content-wrap">
+        <div class="summary-toolbar">
+          <div style="flex:1;min-width:0;display:flex;gap:6px;flex-wrap:wrap">${pillsHtml}</div>
+          <button class="tbtn btn-gray" id="summary-edit-btn" onclick="_summaryToggleEdit()" title="Edit markdown">✎ Edit</button>
+          <button class="tbtn btn-gray" onclick="copyToClipboard(summaryMD)" title="Copy markdown">📋 Copy</button>
+          <a class="tbtn btn-gray" href="/api/summary-raw/${enc(activeCourse)}?file=${enc(_summaryActiveFile)}" download style="text-decoration:none">⬇ Download</a>
+        </div>
+        <div id="summary-view-wrap">
+          <div class="md-content" id="summary-md-content">${data.html}</div>
+        </div>
+        <div id="summary-edit-wrap" style="display:none;flex-direction:column;gap:8px">
+          <textarea id="summary-editor">${esc(data.md)}</textarea>
+          <div style="display:flex;gap:8px">
+            <button class="tbtn btn-blue" onclick="_summarySave()">Save</button>
+            <button class="tbtn btn-gray" onclick="_summaryToggleEdit()">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  window.summaryMD = data.md;
+  _buildAndInjectToC();
+  renderLatexIn('summary-md-content');
+}
+
+function _summaryToggleEdit() {
+  _summaryEditMode = !_summaryEditMode;
+  document.getElementById('summary-view-wrap').style.display = _summaryEditMode ? 'none' : '';
+  document.getElementById('summary-edit-wrap').style.display = _summaryEditMode ? 'flex' : 'none';
+  document.getElementById('summary-edit-btn').textContent = _summaryEditMode ? '👁 View' : '✎ Edit';
+}
+
+async function _summarySave() {
+  const content = document.getElementById('summary-editor').value;
+  await fetch(`/api/summary-save/${enc(activeCourse)}`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ file: _summaryActiveFile, content }),
+  });
+  toast('Saved', 'ok');
+  loadSummary(_summaryActiveFile);
+}
+
+function _summaryRename(filename, currentLabel) {
+  const newLabel = prompt('Rename summary:', currentLabel);
+  if (!newLabel || newLabel === currentLabel) return;
+  fetch(`/api/summary-rename/${enc(activeCourse)}`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ file: filename, label: newLabel }),
+  }).then(r => r.json()).then(d => {
+    if (d.ok) { toast('Renamed', 'ok'); loadSummary(d.file); }
+    else toast(d.error || 'Rename failed', 'err');
+  });
+}
+
+function _summaryDelete(filename) {
+  showConfirm('Delete summary?', `"${filename}" will be permanently deleted.`, async () => {
+    await fetch(`/api/summary-delete/${enc(activeCourse)}`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ file: filename }),
+    });
+    toast('Deleted', 'ok');
+    loadSummary();
+  });
+}
+
+function _updateSummarizeBtn() { /* no-op: always create new numbered summary */ }
+
+function setSummaryLength(len) {
+  localStorage.setItem('summary_length', len);
+  document.getElementById('sum-len-short')?.classList.toggle('btn-blue', len === 'short');
+  document.getElementById('sum-len-short')?.classList.toggle('btn-gray',  len !== 'short');
+  document.getElementById('sum-len-long')?.classList.toggle('btn-blue',  len === 'long');
+  document.getElementById('sum-len-long')?.classList.toggle('btn-gray',   len !== 'long');
+}
+
+async function generateSummary() {
+  const files  = getSelectedFiles();
+  const limit  = parseInt(document.getElementById('limit-input')?.value) || 50;
+  const lang   = localStorage.getItem('summary_lang') || 'en';
+  const length = localStorage.getItem('summary_length') || 'short';
   setLoading(true);
   logShow(`Generating summary for "${activeCourse}"…\n`);
 
   const res  = await fetch('/api/summarize', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ course: activeCourse, limit, force, files, lang, new_file: newFile })
+    body: JSON.stringify({ course: activeCourse, limit, force: true, files, lang, new_file: true, length })
   });
   const data = await res.json();
   logAppend(data.log || '');
@@ -4221,7 +4713,7 @@ async function generateSummary(force, newFile = false) {
     } else if (log.includes('connection') || log.includes('verbindung')) {
       logAppend(_setupErrorMsg('no_connection'));
     }
-    toast('Fehler beim Erstellen der Zusammenfassung.', 'err');
+    toast('Error creating summary.', 'err');
   }
 }
 
@@ -4230,12 +4722,12 @@ function _setupErrorMsg(type) {
     no_key: `
 
 ╔══════════════════════════════════════════════════════════════╗
-  ❌  Kein API-Key konfiguriert
+  ❌  No API key configured
 ══════════════════════════════════════════════════════════════════
-  Für KI-Zusammenfassungen wird ein API-Key benötigt.
-  Trage einen der folgenden Keys in die .env-Datei ein:
+  An API key is required for AI summaries.
+  Add one of the following keys to your .env file:
 
-  Option A – Anthropic (empfohlen, kostenloser Testkredit):
+  Option A – Anthropic (recommended, free trial credit):
     ANTHROPIC_API_KEY=sk-ant-...
     → https://console.anthropic.com  →  "API Keys"
 
@@ -4243,30 +4735,30 @@ function _setupErrorMsg(type) {
     OPENAI_API_KEY=sk-...
     → https://platform.openai.com/api-keys
 
-  Option C – Andere (Groq, Mistral, Ollama …):
-    OPENAI_API_KEY=dein-key
+  Option C – Other (Groq, Mistral, Ollama …):
+    OPENAI_API_KEY=your-key
     OPENAI_BASE_URL=https://api.groq.com/openai/v1
     OPENAI_MODEL=llama-3.3-70b-versatile
 ╚══════════════════════════════════════════════════════════════╝`,
     bad_key: `
 
 ╔══════════════════════════════════════════════════════════════╗
-  ❌  API-Key ungültig oder abgelaufen
+  ❌  API key invalid or expired
 ══════════════════════════════════════════════════════════════════
-  Der in .env eingetragene ANTHROPIC_API_KEY wurde abgelehnt.
+  The ANTHROPIC_API_KEY in your .env was rejected.
 
-  Prüfe folgendes:
-  1. Öffne .env und kontrolliere, ob der Key korrekt kopiert
-     wurde (kein Leerzeichen, vollständig, beginnt mit sk-ant-)
-  2. Prüfe auf https://console.anthropic.com ob der Key noch
-     aktiv ist und Guthaben vorhanden ist
+  Check the following:
+  1. Open .env and verify the key was copied correctly
+     (no spaces, complete, starts with sk-ant-)
+  2. Check https://console.anthropic.com that the key is
+     still active and has remaining credit
 ╚══════════════════════════════════════════════════════════════╝`,
     no_connection: `
 
 ╔══════════════════════════════════════════════════════════════╗
-  ❌  Keine Verbindung zur Anthropic API
+  ❌  No connection to Anthropic API
 ══════════════════════════════════════════════════════════════════
-  Prüfe deine Internetverbindung und versuche es erneut.
+  Check your internet connection and try again.
 ╚══════════════════════════════════════════════════════════════╝`,
   };
   return msgs[type] || '';
@@ -4283,28 +4775,445 @@ async function copyToClipboard(text) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Flashcards — single course
+// SRS Study System
 // ═══════════════════════════════════════════════════════════════════════════
-async function loadFlashcards() {
-  const [cards, prog] = await Promise.all([
-    fetch(`/api/flashcards/${enc(activeCourse)}`).then(r => r.json()),
-    fetch(`/api/progress/${enc(activeCourse)}`).then(r => r.json()),
-  ]);
+let _srsAllCards = [], _srsData = {}, _srsSession = null;
 
-  if (!cards.length) {
+function _srsToday() { return new Date().toISOString().split('T')[0]; }
+
+function _srsCardState(entry) {
+  if (!entry || !entry.reps) return 'new';
+  const today = _srsToday();
+  if (entry.state === 'mastered') return 'mastered';
+  if (entry.due < today)  return 'overdue';
+  if (entry.due === today) return 'due';
+  if (entry.interval <= 7) return 'learning';
+  return 'review';
+}
+
+function srsSchedule(entry, rating) {
+  let { interval = 1, ease = 2.5, reps = 0, lapses = 0 } = entry || {};
+  let state;
+  if (rating === 1) {
+    lapses++; ease = Math.max(1.3, ease - 0.2); interval = 1; reps = 0; state = 'learning';
+  } else {
+    reps++;
+    if      (reps === 1) interval = rating === 4 ? 4 : 1;
+    else if (reps === 2) interval = rating === 4 ? 7 : 3;
+    else if (rating === 2) { interval = Math.max(1, Math.round(interval * 1.2)); ease = Math.max(1.3, ease - 0.15); }
+    else if (rating === 3) interval = Math.round(interval * ease);
+    else                   { interval = Math.round(interval * ease * 1.3); ease = Math.min(3.0, ease + 0.15); }
+    state = interval >= 21 ? 'mastered' : 'review';
+  }
+  const due = new Date(); due.setDate(due.getDate() + interval);
+  return { interval, ease, reps, lapses, state, due: due.toISOString().split('T')[0] };
+}
+
+async function loadFlashcards() {
+  const [summaryCards, customCards, srsRaw] = await Promise.all([
+    fetch(`/api/flashcards/${enc(activeCourse)}`).then(r => r.json()),
+    fetch(`/api/custom-cards/${enc(activeCourse)}`).then(r => r.json()),
+    fetch(`/api/srs/${enc(activeCourse)}`).then(r => r.json()),
+  ]);
+  const normCustom = customCards.map((c, i) => ({
+    id: `custom_${i}_${c.q.slice(0,16).replace(/\s/g,'_')}`,
+    section: 'Custom', q: c.q, a: c.a,
+  }));
+  _srsAllCards = [...summaryCards, ...normCustom];
+  _srsData = srsRaw || {};
+
+  if (!_srsAllCards.length) {
     document.getElementById('learn-body').innerHTML = `
       <div class="empty-state">
         <div class="icon">🧠</div>
-        <h3>Keine Lernkarten</h3>
-        <p>Erstelle zuerst eine Zusammenfassung — Trainingsfragen werden automatisch als Karten erkannt.</p>
-        <button class="tbtn btn-blue" onclick="switchTab('files')">Zusammenfassung erstellen →</button>
+        <h3>No flashcards yet</h3>
+        <p>Add your own cards or generate them from the AI summary.</p>
+        <button class="tbtn btn-blue" onclick="showManageCards()">+ Add cards</button>
       </div>`;
     return;
   }
+  renderStudyOverview();
+}
 
-  flashState = { cards, index: 0, revealed: false, progress: prog.cards || {}, timerStart: Date.now(), timerInterval: null, isGlobal: false };
-  startTimer();
-  renderFlash();
+function renderStudyOverview() {
+  let nDue = 0, nNew = 0, nLearning = 0, nMastered = 0;
+  for (const c of _srsAllCards) {
+    const s = _srsCardState(_srsData[c.id]);
+    if (s === 'new')                    nNew++;
+    else if (s === 'due' || s === 'overdue') nDue++;
+    else if (s === 'mastered')          nMastered++;
+    else                                nLearning++;
+  }
+  const studyCount = nDue + Math.min(nNew, 20);
+  document.getElementById('learn-body').innerHTML = `
+    <div class="srs-overview">
+      <div class="srs-overview-header">
+        <h2>Study</h2>
+        <button class="tbtn btn-gray" style="font-size:11px" onclick="showManageCards()">✎ Cards</button>
+      </div>
+      <div class="srs-stats">
+        <div class="srs-stat srs-stat-due">
+          <div class="srs-stat-num">${nDue}</div>
+          <div class="srs-stat-label">Due</div>
+        </div>
+        <div class="srs-stat srs-stat-new">
+          <div class="srs-stat-num">${nNew}</div>
+          <div class="srs-stat-label">New</div>
+        </div>
+        <div class="srs-stat srs-stat-learning">
+          <div class="srs-stat-num">${nLearning}</div>
+          <div class="srs-stat-label">Learning</div>
+        </div>
+        <div class="srs-stat srs-stat-mastered">
+          <div class="srs-stat-num">${nMastered}</div>
+          <div class="srs-stat-label">Mastered</div>
+        </div>
+      </div>
+      <div class="srs-action-btns">
+        ${studyCount > 0
+          ? `<button class="tbtn btn-blue" style="flex:1" onclick="_srsStart('due')">▶ Study due + new (${studyCount})</button>`
+          : `<button class="tbtn btn-gray" style="flex:1;opacity:.6" disabled>✓ All caught up for today!</button>`}
+        <button class="tbtn btn-gray" onclick="_srsStart('all')">All (${_srsAllCards.length})</button>
+      </div>
+      ${nMastered > 0 ? `<p style="font-size:12px;color:var(--text3);margin:0 0 12px">🏆 ${nMastered} card${nMastered>1?'s':''} mastered — well done!</p>` : ''}
+    </div>`;
+}
+
+function _srsStart(mode) {
+  let queue;
+  if (mode === 'due') {
+    const due = _srsAllCards.filter(c => { const s = _srsCardState(_srsData[c.id]); return s === 'due' || s === 'overdue'; });
+    const nw  = _srsAllCards.filter(c => _srsCardState(_srsData[c.id]) === 'new').slice(0, 20);
+    queue = shuffleArr([...due, ...nw]);
+  } else {
+    queue = shuffleArr([..._srsAllCards]);
+  }
+  if (!queue.length) { renderStudyOverview(); return; }
+  _srsSession = {
+    queue, current: 0, revealed: false,
+    ratings: {1:0,2:0,3:0,4:0},
+    startTime: Date.now(),
+    timerInterval: setInterval(() => {
+      const el = document.getElementById('srs-timer');
+      if (el) el.textContent = formatTime(Date.now() - _srsSession.startTime);
+    }, 1000),
+  };
+  _srsRenderCard();
+}
+
+const _TYPE_LABELS = { recall:'Definition', mechanism:'Mechanism', contrast:'Contrast', application:'Application', cloze:'Fill in the blank' };
+
+function _cardTypeBadge(type) {
+  const label = _TYPE_LABELS[type] || 'Definition';
+  return `<span class="card-type-badge ct-${type||'recall'}">${label}</span>`;
+}
+
+function _clozeQ(q) {
+  return q.split('___').map(mdToHtml).join('<span class="cloze-blank"></span>');
+}
+
+function _clozeFilled(q, a) {
+  return q.split('___').map(mdToHtml).join(`<span class="cloze-fill">${mdToHtml(a)}</span>`);
+}
+
+function _srsRenderCard() {
+  const { queue, current } = _srsSession;
+  if (current >= queue.length) { _srsDone(); return; }
+  const card  = queue[current];
+  const entry = _srsData[card.id];
+  const state = _srsCardState(entry);
+  const pct   = Math.round(current / queue.length * 100);
+  const badgeClass = { new:'srs-badge-new', due:'srs-badge-due', overdue:'srs-badge-overdue', learning:'srs-badge-learning', review:'srs-badge-review', mastered:'srs-badge-mastered' }[state] || 'srs-badge-new';
+  const intervalHint = entry?.interval ? (entry.interval === 1 ? 'interval: 1d' : `interval: ${entry.interval}d`) : 'first time';
+  const isCloze = card.type === 'cloze';
+  const questionHtml = isCloze ? _clozeQ(card.q) : mdToHtml(card.q);
+
+  document.getElementById('learn-body').innerHTML = `
+    <div class="flash-layout">
+      <div class="flash-header">
+        <span class="flash-header-title">${esc((activeCourse||'').split('/').pop())}</span>
+        <span id="srs-timer" class="flash-timer">0:00</span>
+        <button class="tbtn btn-gray" style="font-size:11px;padding:4px 10px" onclick="_srsAbort()">✕ Exit</button>
+      </div>
+      <div class="flash-progress-bar"><div class="flash-progress-fill" style="width:${pct}%"></div></div>
+      <div class="flash-meta">
+        <span>${current+1} / ${queue.length}</span>
+        <span class="srs-badge ${badgeClass}">${state}</span>
+        <span style="font-size:11px;color:var(--text3)">${intervalHint}</span>
+      </div>
+      <div class="flash-card" id="srs-card-el">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+          <div class="flash-section" style="margin:0">${esc(card.section||'')}</div>
+          ${_cardTypeBadge(card.type)}
+        </div>
+        <div class="flash-question" id="srs-question">${questionHtml}</div>
+        <div class="flash-answer" id="srs-answer" style="display:none">${isCloze ? `<span style="font-size:12px;color:var(--text3)">Answer: </span><strong>${mdToHtml(card.a)}</strong>` : mdToHtml(card.a)}</div>
+      </div>
+      <div id="srs-btns">
+        <div style="text-align:center">
+          <button class="flash-btn fb-reveal" onclick="_srsReveal()">Show answer</button>
+        </div>
+        <div class="flash-kbd-hint"><kbd>Space</kbd> Show answer</div>
+      </div>
+    </div>`;
+
+  const t = document.getElementById('srs-timer');
+  if (t) t.textContent = formatTime(Date.now() - _srsSession.startTime);
+  _srsSession.revealed = false;
+  renderLatexIn('srs-question');
+}
+
+function _srsReveal() {
+  _srsSession.revealed = true;
+  const card = _srsSession.queue[_srsSession.current];
+  const isCloze = card.type === 'cloze';
+  if (isCloze) {
+    document.getElementById('srs-question').innerHTML = _clozeFilled(card.q, card.a);
+    renderLatexIn('srs-question');
+  }
+  document.getElementById('srs-answer').style.display = 'block';
+  document.getElementById('srs-btns').innerHTML = `
+    <div class="rating-grid">
+      <button class="rb rb-again" onclick="_srsRate(1)"><span class="rb-label">Again</span><span class="rb-hint">1</span></button>
+      <button class="rb rb-hard"  onclick="_srsRate(2)"><span class="rb-label">Hard</span><span class="rb-hint">2</span></button>
+      <button class="rb rb-good"  onclick="_srsRate(3)"><span class="rb-label">Good</span><span class="rb-hint">3</span></button>
+      <button class="rb rb-easy"  onclick="_srsRate(4)"><span class="rb-label">Easy</span><span class="rb-hint">4</span></button>
+    </div>
+    <div class="flash-kbd-hint"><kbd>1</kbd> Again &nbsp; <kbd>2</kbd> Hard &nbsp; <kbd>3</kbd> Good &nbsp; <kbd>4</kbd> Easy</div>`;
+  renderLatexIn('srs-answer');
+}
+
+function _srsRate(rating) {
+  const card = _srsSession.queue[_srsSession.current];
+  _srsData[card.id] = srsSchedule(_srsData[card.id], rating);
+  _srsSession.ratings[rating]++;
+  _srsSession.current++;
+  _srsSession.revealed = false;
+  const el = document.getElementById('srs-card-el');
+  const cls = (rating <= 2) ? 'flash-card-unknown' : 'flash-card-known';
+  if (el) { el.classList.add(cls); setTimeout(_srsRenderCard, 120); } else _srsRenderCard();
+  _srsSave();
+}
+
+function _srsSave() {
+  fetch(`/api/srs/${enc(activeCourse)}`, {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(_srsData),
+  });
+}
+
+function _srsDone() {
+  clearInterval(_srsSession.timerInterval);
+  const elapsed = formatTime(Date.now() - _srsSession.startTime);
+  const { ratings, queue } = _srsSession;
+  const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
+  const tStr = tomorrow.toISOString().split('T')[0];
+  const dueTomorrow = _srsAllCards.filter(c => _srsData[c.id]?.due === tStr).length;
+  const rColor = {1:'var(--red)',2:'var(--orange)',3:'var(--blue)',4:'var(--green)'};
+  const rLabel = {1:'Again',2:'Hard',3:'Good',4:'Easy'};
+  document.getElementById('learn-body').innerHTML = `
+    <div class="srs-summary">
+      <div style="font-size:52px;margin-bottom:12px">🎉</div>
+      <h2>Session complete!</h2>
+      <p class="srs-summary-sub">${queue.length} card${queue.length>1?'s':''} reviewed &middot; ⏱ ${elapsed}</p>
+      <div class="srs-rating-breakdown">
+        ${[1,2,3,4].map(r=>`
+          <div class="srb-item">
+            <div class="srb-num" style="color:${rColor[r]}">${ratings[r]}</div>
+            <div class="srb-label">${rLabel[r]}</div>
+          </div>`).join('')}
+      </div>
+      ${dueTomorrow > 0 ? `
+      <div class="srs-next-due">
+        <div class="srs-next-due-title">Up next</div>
+        ${dueTomorrow} card${dueTomorrow>1?'s':''} due tomorrow
+      </div>` : ''}
+      <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap">
+        <button class="tbtn btn-blue" onclick="renderStudyOverview()">← Overview</button>
+        <button class="tbtn btn-gray" onclick="_srsStart('due')">Study again</button>
+      </div>
+    </div>`;
+}
+
+function _srsAbort() {
+  clearInterval(_srsSession?.timerInterval);
+  _srsSession = null;
+  renderStudyOverview();
+}
+
+function resetProgress() {
+  showConfirm('Reset SRS progress?',
+    `All study data for "${activeCourse}" will be deleted.`,
+    async () => {
+      await fetch(`/api/srs/${enc(activeCourse)}`, { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+      _srsData = {};
+      toast('Progress reset', 'ok');
+      renderStudyOverview();
+    }
+  );
+}
+
+// ── Manage cards ────────────────────────────────────────────────────────────
+let _mcSummaries = [], _mcSelectedSummary = null;
+
+async function showManageCards() {
+  const [summaryCards, customCards, summaries] = await Promise.all([
+    fetch(`/api/flashcards/${enc(activeCourse)}`).then(r => r.json()),
+    fetch(`/api/custom-cards/${enc(activeCourse)}`).then(r => r.json()),
+    fetch(`/api/summaries/${enc(activeCourse)}`).then(r => r.json()),
+  ]);
+  _mcCustomCards = [...customCards];
+  _mcSummaries   = summaries || [];
+  if (!_mcSelectedSummary && _mcSummaries.length) _mcSelectedSummary = _mcSummaries[0].name;
+  _renderManageCards(summaryCards);
+}
+
+let _mcCustomCards = [];
+
+function _renderManageCards(summaryCards) {
+  const courseInfo = allCourses.find(c => c.path === activeCourse);
+  const hasSummary = courseInfo?.has_summary || false;
+  const customList = _mcCustomCards.map((c, i) => `
+    <div class="mc-card">
+      <div class="mc-card-body">
+        ${_cardTypeBadge(c.type)}
+        <div class="mc-card-q">${c.type === 'cloze' ? _clozeQ(c.q) : mdToHtml(c.q)}</div>
+        <div class="mc-card-a">${mdToHtml(c.a)}</div>
+      </div>
+      <button class="mc-card-del" onclick="_mcDelete(${i})" title="Delete">✕</button>
+    </div>`).join('');
+
+  const totalCards = summaryCards.length + _mcCustomCards.length;
+
+  document.getElementById('learn-body').innerHTML = `
+    <div class="manage-cards-wrap">
+      <div class="manage-cards-header">
+        <h2>Flashcards</h2>
+        ${totalCards ? `<button class="tbtn btn-blue" onclick="renderStudyOverview()">▶ Study (${totalCards})</button>` : ''}
+      </div>
+
+      ${hasSummary ? `
+      <div class="mc-gen-section">
+        <div class="mc-gen-info">
+          <div class="mc-gen-icon">✨</div>
+          <div>
+            <div class="mc-gen-title">Generate from summary</div>
+            <div class="mc-gen-desc">
+              <select id="mc-gen-file" style="background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:11px;padding:3px 6px;margin-top:4px;max-width:220px"
+                onchange="_mcSelectedSummary=this.value">
+                ${_mcSummaries.map(s => `<option value="${esc(s.name)}" ${s.name===_mcSelectedSummary?'selected':''}>${esc(summaryLabel(s.name))}</option>`).join('')}
+              </select>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+          <input id="mc-gen-count" type="number" value="10" min="3" max="30"
+            style="width:52px;background:var(--bg3);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:12px;padding:4px 6px;text-align:center"
+            title="Number of cards">
+          <button class="tbtn btn-blue" id="mc-gen-btn" onclick="_mcGenerate()">Generate</button>
+        </div>
+      </div>
+` : `
+      <div class="mc-gen-section mc-gen-section-disabled">
+        <div class="mc-gen-icon">✨</div>
+        <span>Create a summary first to generate cards with AI.</span>
+      </div>`}
+
+      <div class="mc-add-form">
+        <textarea id="mc-q" placeholder="Question…" rows="2"></textarea>
+        <textarea id="mc-a" placeholder="Answer…" rows="2"></textarea>
+        <div class="mc-add-row">
+          <button class="tbtn btn-blue" onclick="_mcAdd()">+ Add card</button>
+        </div>
+      </div>
+
+      ${_mcCustomCards.length ? `
+        <div class="mc-section-label">Your cards (${_mcCustomCards.length})</div>
+        <div class="mc-list">${customList}</div>` : ''}
+
+      ${hasSummary ? `
+        <div class="mc-section-label">From summary (${summaryCards.length})</div>
+        <div class="mc-list">${summaryCards.map(c => `
+          <div class="mc-card">
+            <div class="mc-card-body">
+              ${_cardTypeBadge(c.type)}
+              <div class="mc-card-q">${c.type === 'cloze' ? _clozeQ(c.q) : mdToHtml(c.q)}</div>
+              <div class="mc-card-a">${mdToHtml(c.a)}</div>
+            </div>
+          </div>`).join('')}
+        </div>` : ''}
+    </div>`;
+  renderLatexIn('learn-body');
+}
+
+function _mcAdd() {
+  const q = document.getElementById('mc-q').value.trim();
+  const a = document.getElementById('mc-a').value.trim();
+  if (!q || !a) return;
+  _mcCustomCards.push({ q, a });
+  _mcSave();
+  showManageCards();
+}
+
+function _mcDelete(i) {
+  _mcCustomCards.splice(i, 1);
+  _mcSave();
+  showManageCards();
+}
+
+function _mcSave() {
+  fetch(`/api/custom-cards/${enc(activeCourse)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(_mcCustomCards),
+  });
+}
+
+async function _mcDeleteSummary(filename) {
+  showConfirm('Delete summary?', `"${filename}" will be permanently deleted.`, async () => {
+    await fetch(`/api/summary-delete/${enc(activeCourse)}`, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ file: filename }),
+    });
+    toast('Summary deleted', 'ok');
+    if (_mcSelectedSummary === filename) _mcSelectedSummary = null;
+    showManageCards();
+  });
+}
+
+async function _mcGenerate() {
+  const btn = document.getElementById('mc-gen-btn');
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = '⏳ Generating…';
+  const count = parseInt(document.getElementById('mc-gen-count')?.value) || 10;
+  const file  = document.getElementById('mc-gen-file')?.value || _mcSelectedSummary || null;
+  logShow(`Generating ${count} flashcards for "${activeCourse}"…\n`);
+  try {
+    const res  = await fetch(`/api/generate-cards/${enc(activeCourse)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ count, file }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      logAppend(`\n${data.error || '❌ Generation failed — unknown error.'}\n`);
+      btn.disabled = false;
+      btn.textContent = 'Generate';
+      return;
+    }
+    const generated = Array.isArray(data) ? data : [];
+    const existing = new Set(_mcCustomCards.map(c => c.q.toLowerCase()));
+    const added = generated.filter(c => !existing.has(c.q.toLowerCase()));
+    _mcCustomCards.push(...added);
+    _mcSave();
+    logAppend(`✅ Done — ${added.length} card${added.length !== 1 ? 's' : ''} added.\n`);
+    showManageCards();
+  } catch(e) {
+    logAppend(`\n❌ Network error: ${e.message}\n`);
+    btn.disabled = false;
+    btn.textContent = 'Generate';
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -4319,170 +5228,14 @@ function shuffleArr(arr) {
   return arr;
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Flashcard rendering
-// ═══════════════════════════════════════════════════════════════════════════
-function startTimer() {
-  if (flashState.timerInterval) clearInterval(flashState.timerInterval);
-  flashState.timerStart = Date.now();
-  flashState.timerInterval = setInterval(() => {
-    const el = document.getElementById('flash-timer-display');
-    if (el) el.textContent = formatTime(Date.now() - flashState.timerStart);
-  }, 1000);
-}
-
-function stopTimer() {
-  if (flashState.timerInterval) { clearInterval(flashState.timerInterval); flashState.timerInterval = null; }
-}
-
 function formatTime(ms) {
   const s = Math.floor(ms / 1000);
   const m = Math.floor(s / 60);
   return `${m}:${String(s % 60).padStart(2, '0')}`;
 }
 
-function renderFlash() {
-  const { cards, index, progress, isGlobal } = flashState;
-  const known   = Object.values(progress).filter(v => v === 'known').length;
-  const unknown = Object.values(progress).filter(v => v === 'unknown').length;
-  const done    = known + unknown;
-  const pct     = cards.length ? Math.round(done / cards.length * 100) : 0;
-
-  if (index >= cards.length) {
-    stopTimer();
-    const elapsed = formatTime(Date.now() - flashState.timerStart);
-    document.getElementById('learn-body').innerHTML = `
-      <div class="flash-layout">
-        <div class="flash-done" style="display:flex">
-          <div class="big-icon">🎉</div>
-          <h2>All cards done!</h2>
-          <p>${known} known · ${unknown} unknown · ${cards.length} total · ⏱ ${elapsed}</p>
-          <div style="display:flex;gap:10px;margin-top:10px;flex-wrap:wrap;justify-content:center">
-            <button class="tbtn btn-gray" onclick="restartFlash()">Again</button>
-            <button class="tbtn btn-blue" onclick="shuffleAndRestart()">🔀 Shuffle</button>
-            ${unknown > 0 ? `<button class="tbtn btn-red" onclick="restartFlashUnknown()">Wrong only (${unknown})</button>` : ''}
-            ${!isGlobal ? `<button class="tbtn btn-gray" onclick="resetProgress()">Reset progress</button>` : ''}
-          </div>
-        </div>
-      </div>`;
-    if (!isGlobal) saveFlashProgress();
-    return;
-  }
-
-  const card = cards[index];
-  document.getElementById('learn-body').innerHTML = `
-    <div class="flash-layout">
-      <div class="flash-header">
-        <span class="flash-header-title">${isGlobal ? '🌍 All courses' : esc(activeCourse || '')}</span>
-        ${!isGlobal ? `<button class="tbtn btn-gray" style="font-size:11px;padding:4px 10px" onclick="resetProgress()">↺ Reset</button>` : ''}
-        <button class="tbtn btn-gray" style="font-size:11px;padding:4px 10px" onclick="shuffleAndRestart()">🔀 Shuffle</button>
-      </div>
-      <div class="flash-progress-bar">
-        <div class="flash-progress-fill" style="width:${pct}%"></div>
-      </div>
-      <div class="flash-meta">
-        <span>${index + 1} / ${cards.length}</span>
-        <span style="color:var(--green)">✓ ${known}</span>
-        <span style="color:var(--red)">✗ ${unknown}</span>
-        <span class="flash-timer" id="flash-timer-display">0:00</span>
-      </div>
-      <div class="flash-card" id="flash-card-el">
-        ${isGlobal && card.course ? `<div class="flash-course-badge">${esc(card.course)}</div>` : ''}
-        <div class="flash-section">${esc(card.section)}</div>
-        <div class="flash-question">${esc(card.q)}</div>
-        <div class="flash-answer" id="flash-answer">${esc(card.a)}</div>
-      </div>
-      <div class="flash-btns" id="flash-btns">
-        <button class="flash-btn fb-reveal" onclick="revealFlash()">Show answer</button>
-      </div>
-      <div class="flash-kbd-hint">
-        <kbd>Space</kbd> Answer &nbsp; <kbd>→</kbd>/<kbd>k</kbd> Known &nbsp; <kbd>←</kbd>/<kbd>u</kbd> Unknown &nbsp; <kbd>Esc</kbd> Home
-      </div>
-    </div>`;
-
-  // Update timer display immediately
-  const timerEl = document.getElementById('flash-timer-display');
-  if (timerEl) timerEl.textContent = formatTime(Date.now() - flashState.timerStart);
-}
-
-function revealFlash() {
-  document.getElementById('flash-answer').style.display = 'block';
-  document.getElementById('flash-btns').innerHTML = `
-    <button class="flash-btn fb-unknown" onclick="rateFlash('unknown')">✗ Unknown</button>
-    <button class="flash-btn fb-known"   onclick="rateFlash('known')">✓ Known</button>`;
-  flashState.revealed = true;
-}
-
-function rateFlash(rating) {
-  const card = flashState.cards[flashState.index];
-  flashState.progress[card.id] = rating;
-  flashState.index++;
-  flashState.revealed = false;
-
-  // Visual feedback
-  const cardEl = document.getElementById('flash-card-el');
-  if (cardEl) {
-    cardEl.classList.add(rating === 'known' ? 'flash-card-known' : 'flash-card-unknown');
-    setTimeout(() => renderFlash(), 120);
-  } else {
-    renderFlash();
-  }
-
-  if (!flashState.isGlobal) saveFlashProgress();
-}
-
-function saveFlashProgress() {
-  const known = Object.values(flashState.progress).filter(v => v === 'known').length;
-  fetch(`/api/progress/${enc(activeCourse)}`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ total: flashState.cards.length, known, cards: flashState.progress })
-  });
-  allCourses = allCourses.map(c => c.path === activeCourse ? {...c, progress: {total: flashState.cards.length, known}} : c);
-  filterAndRenderSidebar();
-}
-
-function restartFlash() {
-  flashState.index = 0;
-  flashState.progress = {};
-  flashState.timerStart = Date.now();
-  renderFlash();
-}
-
-function shuffleAndRestart() {
-  flashState.cards = shuffleArr([...flashState.cards]);
-  flashState.index = 0;
-  flashState.progress = {};
-  flashState.timerStart = Date.now();
-  startTimer();
-  renderFlash();
-}
-
-function restartFlashUnknown() {
-  const unknown = flashState.cards.filter(c => flashState.progress[c.id] !== 'known');
-  flashState = { ...flashState, cards: shuffleArr(unknown), index: 0, revealed: false, progress: {} };
-  flashState.timerStart = Date.now();
-  startTimer();
-  renderFlash();
-}
-
-function resetProgress() {
-  showConfirm(
-    'Reset progress?',
-    `All progress data for "${activeCourse}" will be deleted.`,
-    async () => {
-      await fetch(`/api/progress-reset/${enc(activeCourse)}`, { method: 'POST' });
-      flashState.progress = {};
-      allCourses = allCourses.map(c => c.name === activeCourse ? {...c, progress: {total: 0, known: 0}} : c);
-      filterAndRenderSidebar();
-      toast('Progress reset', 'ok');
-      loadFlashcards();
-    }
-  );
-}
-
 // ═══════════════════════════════════════════════════════════════════════════
-// Flashcard keyboard shortcuts
+// Keyboard shortcuts
 // ═══════════════════════════════════════════════════════════════════════════
 document.addEventListener('keydown', e => {
   // Overlay close
@@ -4537,19 +5290,17 @@ document.addEventListener('keydown', e => {
     }
   }
 
-  // Flashcard shortcuts
-  if (activeTab !== 'learn' && document.getElementById('panel-learn').style.display === 'none') return;
+  // SRS Study shortcuts
+  if (activeTab !== 'learn') return;
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (!_srsSession) return;
 
   if (e.key === ' ' || e.code === 'Space') {
     e.preventDefault();
-    if (!flashState.revealed && flashState.index < flashState.cards.length) revealFlash();
-  } else if (e.key === 'ArrowRight' || e.key === 'k') {
+    if (!_srsSession.revealed && _srsSession.current < _srsSession.queue.length) _srsReveal();
+  } else if ((e.key === '1' || e.key === '2' || e.key === '3' || e.key === '4') && _srsSession.revealed) {
     e.preventDefault();
-    if (flashState.revealed && flashState.index < flashState.cards.length) rateFlash('known');
-  } else if (e.key === 'ArrowLeft' || e.key === 'u') {
-    e.preventDefault();
-    if (flashState.revealed && flashState.index < flashState.cards.length) rateFlash('unknown');
+    _srsRate(parseInt(e.key));
   }
 });
 
@@ -4815,7 +5566,7 @@ function loadChat() {
         <textarea id="chat-input" placeholder="Ask a question… (Enter to send, Shift+Enter for newline)"
           ${hasSummary ? '' : 'disabled'}
           onkeydown="handleChatKey(event)" oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px'"></textarea>
-        <button class="chat-input-btn" id="chat-send-btn" onclick="sendChat()" ${hasSummary ? '' : 'disabled'}>Senden</button>
+        <button class="chat-input-btn" id="chat-send-btn" onclick="sendChat()" ${hasSummary ? '' : 'disabled'}>Send</button>
       </div>
     </div>`;
 }
@@ -5166,6 +5917,43 @@ function esc(s) {
 }
 function enc(s) { return encodeURIComponent(s); }
 
+/** Render card text: protect LaTeX, HTML-escape, apply **bold** / *italic* markdown. */
+function mdToHtml(text) {
+  text = String(text);
+  // 1. Stash LaTeX so it doesn't get escaped or processed
+  const stash = [];
+  text = text.replace(/\$\$[\s\S]+?\$\$|\$[^$\n]+?\$/g, m => {
+    stash.push(m);
+    return `\x00${stash.length - 1}\x00`;
+  });
+  // 2. HTML-escape the rest
+  text = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // 3. Markdown: bold then italic
+  text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/\*([^*\n]+?)\*/g, '<em>$1</em>');
+  // 4. Restore LaTeX
+  text = text.replace(/\x00(\d+)\x00/g, (_, i) => stash[+i]);
+  return text;
+}
+
+function renderLatexIn(elId) {
+  const el = typeof elId === 'string' ? document.getElementById(elId) : elId;
+  if (!el) return;
+  if (!window.renderMathInElement) {
+    setTimeout(() => renderLatexIn(el), 150);
+    return;
+  }
+  renderMathInElement(el, {
+    delimiters: [
+      { left: '$$', right: '$$', display: true  },
+      { left: '$',  right: '$',  display: false },
+      { left: '\\[', right: '\\]', display: true  },
+      { left: '\\(', right: '\\)', display: false },
+    ],
+    throwOnError: false,
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Command Palette
 // ═══════════════════════════════════════════════════════════════════════════
@@ -5202,10 +5990,10 @@ function _buildPaletteItems(q) {
     actions.push(
       { icon: '📁', label: `Files — ${cname}`,                   meta: 'Tab',    fn: () => switchTab('files') },
       { icon: '📄', label: `Summary — ${cname}`,                 meta: 'Tab',    fn: () => switchTab('summary') },
-      { icon: '🧠', label: `Learn — ${cname}`,                   meta: 'Tab',    fn: () => switchTab('learn') },
+      { icon: '🧠', label: `Study — ${cname}`,                   meta: 'Tab',    fn: () => switchTab('learn') },
       { icon: '✏️', label: `Notes — ${cname}`,                   meta: 'Tab',    fn: () => switchTab('notes') },
       { icon: '💬', label: `Chat — ${cname}`,                    meta: 'Tab',    fn: () => switchTab('chat') },
-      { icon: '✨', label: `Create summary — ${cname}`,          meta: 'Action', fn: () => { switchTab('files'); setTimeout(() => generateSummary(false), 100); } },
+      { icon: '✨', label: `Create summary — ${cname}`,          meta: 'Action', fn: () => { switchTab('files'); setTimeout(() => generateSummary(), 100); } },
       { icon: '↓',  label: `Sync course — ${cname}`,             meta: 'Sync',   fn: () => syncCourse() },
     );
   }
@@ -5237,7 +6025,7 @@ function renderPaletteResults(q) {
 
   const el = document.getElementById('cmd-results');
   if (!_cmdItems.length) {
-    el.innerHTML = '<div id="cmd-empty">Keine Ergebnisse</div>';
+    el.innerHTML = '<div id="cmd-empty">No results</div>';
     return;
   }
 
@@ -5371,7 +6159,28 @@ function markSelectedFilesRead(read) {
   filterAndRenderSidebar();
 }
 
+// ── Welcome modal ─────────────────────────────────────────────────────────
+function initWelcome() {
+  if (!localStorage.getItem('welcome_seen')) {
+    document.getElementById('welcome-overlay').classList.remove('hidden');
+  }
+}
+function closeWelcome() {
+  localStorage.setItem('welcome_seen', '1');
+  const el = document.getElementById('welcome-overlay');
+  el.style.opacity = '0';
+  el.style.transition = 'opacity .2s ease';
+  setTimeout(() => el.classList.add('hidden'), 200);
+}
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeWelcome();
+});
+document.getElementById('welcome-overlay').addEventListener('click', e => {
+  if (e.target === e.currentTarget) closeWelcome();
+});
+
 boot();
+initWelcome();
 </script>
 </body>
 </html>"""
@@ -5383,7 +6192,7 @@ def api_chat(course_name):
     question = request.json.get("question", "").strip()
     history  = request.json.get("history", [])   # [{role, content}, …]
     if not question:
-        return jsonify({"error": "Keine Frage"}), 400
+        return jsonify({"error": "No question provided"}), 400
 
     course_dir   = COURSES_DIR / course_name
     summary_path = get_latest_summary(course_dir)
@@ -5391,16 +6200,16 @@ def api_chat(course_name):
     context = summary_path.read_text(encoding="utf-8")[:10000] if summary_path and summary_path.exists() else ""
     notes   = notes_path.read_text(encoding="utf-8")[:3000]    if notes_path.exists()   else ""
 
-    system = f"""Du bist ein präziser Lernassistent für den Kurs „{course_name.split('/')[-1]}". \
-Antworte immer auf Deutsch, knapp und lernorientiert.
+    system = f"""You are a concise study assistant for the course "{course_name.split('/')[-1]}". \
+Always respond in English, keep answers brief and learning-focused.
 
-<kurszusammenfassung>
-{context or "Keine Zusammenfassung vorhanden."}
-</kurszusammenfassung>
-{f"<notizen>{notes}</notizen>" if notes else ""}
+<course_summary>
+{context or "No summary available."}
+</course_summary>
+{f"<notes>{notes}</notes>" if notes else ""}
 
-Beantworte Fragen ausschließlich basierend auf diesen Materialien. \
-Wenn etwas nicht abgedeckt ist, weise darauf hin."""
+Answer questions based solely on these materials. \
+If something is not covered, say so."""
 
     messages = history + [{"role": "user", "content": question}]
 
