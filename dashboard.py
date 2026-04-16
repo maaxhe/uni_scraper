@@ -475,6 +475,17 @@ def api_rename_chat_history(course_name):
     p.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     return jsonify({"ok": True})
 
+@app.route("/api/chat-history/<path:course_name>/delete", methods=["DELETE"])
+def api_delete_chat_history(course_name):
+    conv_id = request.json.get("id")
+    p = COURSES_DIR / course_name / CHAT_HISTORY_FILE
+    if not p.exists():
+        return jsonify({"error": "not found"}), 404
+    history = json.loads(p.read_text(encoding="utf-8"))
+    history = [e for e in history if e.get("id") != conv_id]
+    p.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"ok": True})
+
 @app.route("/api/generate-cards/<path:course_name>", methods=["POST"])
 def api_generate_cards(course_name):
     course_dir   = COURSES_DIR / course_name
@@ -5982,6 +5993,7 @@ async function _chatHistoryLoad() {
     <div class="chat-history-item" data-idx="${i}">
       <span class="chat-history-item-label" onclick="_chatHistoryLoad_open(${i})">${esc(c.title)}</span>
       <button class="chat-history-rename-btn" onclick="_chatHistoryRename(${i}, event)" title="Rename">✏️</button>
+      <button class="chat-history-rename-btn" onclick="_chatHistoryDelete(${i}, event)" title="Delete" style="color:var(--red)">🗑</button>
     </div>`).join('');
 }
 
@@ -6020,6 +6032,19 @@ function _chatHistoryRename(idx, e) {
     if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
     if (e.key === 'Escape') { input.value = conv.title; input.blur(); }
   });
+}
+
+async function _chatHistoryDelete(idx, e) {
+  e.stopPropagation();
+  const conv = _chatHistoryData[idx];
+  await fetch(`/api/chat-history/${enc(activeCourse)}/delete`, {
+    method: 'DELETE',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ id: conv.id }),
+  });
+  _chatHistoryData.splice(idx, 1);
+  // Re-render list
+  _chatHistoryLoad();
 }
 
 function _chatHistoryLoad_open(idx) {
