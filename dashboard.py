@@ -5763,11 +5763,11 @@ async function sendChat() {
       const copyBtn = document.createElement('button');
       copyBtn.textContent = '⎘';
       copyBtn.title = 'Copy';
-      copyBtn.style.cssText = 'position:absolute;top:6px;right:6px;background:none;border:none;color:var(--text3);cursor:pointer;font-size:13px;padding:2px 4px;opacity:0;transition:opacity .15s';
+      copyBtn.style.cssText = 'position:absolute;top:8px;right:8px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text3);cursor:pointer;font-size:11px;padding:2px 7px;opacity:0;transition:opacity .15s';
       copyBtn.onclick = () => _chatCopyBubble(copyBtn);
       bubbleEl2.appendChild(copyBtn);
-      bubbleEl2.addEventListener('mouseenter', () => copyBtn.style.opacity = '1');
-      bubbleEl2.addEventListener('mouseleave', () => copyBtn.style.opacity = '0');
+      bubbleEl2.closest('.chat-msg')?.addEventListener('mouseenter', () => copyBtn.style.opacity = '1');
+      bubbleEl2.closest('.chat-msg')?.addEventListener('mouseleave', () => copyBtn.style.opacity = '0');
       renderLatexIn(bubbleEl2);
     }
     chatHistory.push({ role: 'assistant', content: fullAnswer });
@@ -5828,8 +5828,8 @@ function appendChatMsg(role, text) {
     copyBtn.style.cssText = 'position:absolute;top:6px;right:6px;background:none;border:none;color:var(--text3);cursor:pointer;font-size:13px;padding:2px 4px;opacity:0;transition:opacity .15s';
     copyBtn.onclick = () => _chatCopyBubble(copyBtn);
     bubble.appendChild(copyBtn);
-    bubble.addEventListener('mouseenter', () => copyBtn.style.opacity = '1');
-    bubble.addEventListener('mouseleave', () => copyBtn.style.opacity = '0');
+    div.addEventListener('mouseenter', () => copyBtn.style.opacity = '1');
+    div.addEventListener('mouseleave', () => copyBtn.style.opacity = '0');
   }
   div.innerHTML = `<div class="chat-avatar">${role === 'user' ? '🧑' : '🤖'}</div>`;
   div.appendChild(bubble);
