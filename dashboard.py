@@ -5640,12 +5640,8 @@ async function sendChat() {
     const bubbleEl2 = document.getElementById(aiId);
     if (bubbleEl2) {
       bubbleEl2.classList.remove('streaming');
-      // Simple markdown: bold, newlines
-      bubbleEl2.innerHTML = fullAnswer
-        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\n\n/g, '</p><p>').replace(/\n/g, '<br>');
-      bubbleEl2.innerHTML = '<p>' + bubbleEl2.innerHTML + '</p>';
+      bubbleEl2.innerHTML = chatMdToHtml(fullAnswer);
+      renderLatexIn(bubbleEl2);
     }
     chatHistory.push({ role: 'assistant', content: fullAnswer });
   } catch (err) {
@@ -5659,14 +5655,42 @@ async function sendChat() {
   input.focus();
 }
 
+function chatMdToHtml(text) {
+  // Stash LaTeX
+  const stash = [];
+  text = text.replace(/\$\$[\s\S]+?\$\$|\$[^$\n]+?\$/g, m => { stash.push(m); return `\x00${stash.length-1}\x00`; });
+  // HTML-escape
+  text = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // Inline code
+  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+  // Bold / italic
+  text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/\*([^*\n]+?)\*/g, '<em>$1</em>');
+  // Bullet lists: lines starting with "- " or "* "
+  text = text.replace(/^[ \t]*[-*] (.+)$/gm, '<li>$1</li>');
+  text = text.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>');
+  // Paragraphs
+  text = text.split(/\n{2,}/).map(block => {
+    if (block.startsWith('<ul>') || block.startsWith('<li>')) return block;
+    block = block.replace(/\n/g, '<br>');
+    return `<p>${block}</p>`;
+  }).join('');
+  // Restore LaTeX
+  text = text.replace(/\x00(\d+)\x00/g, (_, i) => stash[+i]);
+  return text;
+}
+
 function appendChatMsg(role, text) {
   const el = document.getElementById('chat-messages');
   const div = document.createElement('div');
   div.className = `chat-msg ${role}`;
-  div.innerHTML = `
-    <div class="chat-avatar">${role === 'user' ? '🧑' : '🤖'}</div>
-    <div class="chat-bubble">${esc(text)}</div>`;
+  const bubble = document.createElement('div');
+  bubble.className = 'chat-bubble';
+  bubble.innerHTML = role === 'user' ? esc(text) : chatMdToHtml(text);
+  div.innerHTML = `<div class="chat-avatar">${role === 'user' ? '🧑' : '🤖'}</div>`;
+  div.appendChild(bubble);
   el.appendChild(div);
+  if (role !== 'user') renderLatexIn(bubble);
   el.scrollTop = el.scrollHeight;
 }
 
