@@ -461,6 +461,20 @@ def api_save_chat_history(course_name):
     p.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     return jsonify({"ok": True, "id": entry["id"]})
 
+@app.route("/api/chat-history/<path:course_name>/rename", methods=["PATCH"])
+def api_rename_chat_history(course_name):
+    data = request.json  # {id, title}
+    p = COURSES_DIR / course_name / CHAT_HISTORY_FILE
+    if not p.exists():
+        return jsonify({"error": "not found"}), 404
+    history = json.loads(p.read_text(encoding="utf-8"))
+    for entry in history:
+        if entry.get("id") == data.get("id"):
+            entry["title"] = data.get("title", entry["title"]).strip() or entry["title"]
+            break
+    p.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"ok": True})
+
 @app.route("/api/generate-cards/<path:course_name>", methods=["POST"])
 def api_generate_cards(course_name):
     course_dir   = COURSES_DIR / course_name
@@ -2249,8 +2263,13 @@ body {
 .chat-history-header { display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border); gap: 8px; }
 .chat-history-header h3 { flex: 1; font-size: 13px; font-weight: 700; color: var(--text); margin: 0; }
 .chat-history-list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
-.chat-history-item { padding: 10px 12px; border-radius: var(--radius); border: 1px solid var(--border); cursor: pointer; transition: background .15s; font-size: 12px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-history-item { padding: 8px 10px; border-radius: var(--radius); border: 1px solid var(--border); cursor: pointer; transition: background .15s; font-size: 12px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 6px; }
 .chat-history-item:hover { background: var(--bg3); }
+.chat-history-item-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-history-rename-btn { flex-shrink: 0; background: none; border: none; color: var(--text3); cursor: pointer; font-size: 12px; padding: 2px 4px; border-radius: 4px; opacity: 0; transition: opacity .15s, color .15s; }
+.chat-history-item:hover .chat-history-rename-btn { opacity: 1; }
+.chat-history-rename-btn:hover { color: var(--blue); }
+.chat-history-rename-input { flex: 1; background: var(--bg); border: 1px solid var(--blue); border-radius: 4px; color: var(--text); font-size: 12px; font-weight: 600; padding: 2px 6px; outline: none; min-width: 0; }
 .chat-suggestion {
   font-size: 12px; padding: 5px 12px; background: var(--bg3); border: 1px solid var(--border);
   border-radius: 16px; cursor: pointer; color: var(--text3);
@@ -5931,7 +5950,47 @@ async function _chatHistoryLoad() {
   _chatHistoryData = await fetch(`/api/chat-history/${enc(activeCourse)}`).then(r => r.json());
   if (!_chatHistoryData.length) { list.innerHTML = '<p style="padding:12px;font-size:12px;color:var(--text3)">No saved conversations yet.</p>'; return; }
   list.innerHTML = _chatHistoryData.map((c, i) => `
-    <div class="chat-history-item" onclick="_chatHistoryLoad_open(${i})">${esc(c.title)}</div>`).join('');
+    <div class="chat-history-item" data-idx="${i}">
+      <span class="chat-history-item-label" onclick="_chatHistoryLoad_open(${i})">${esc(c.title)}</span>
+      <button class="chat-history-rename-btn" onclick="_chatHistoryRename(${i}, event)" title="Rename">✏️</button>
+    </div>`).join('');
+}
+
+function _chatHistoryRename(idx, e) {
+  e.stopPropagation();
+  const conv = _chatHistoryData[idx];
+  const item = document.querySelector(`.chat-history-item[data-idx="${idx}"]`);
+  const label = item.querySelector('.chat-history-item-label');
+  const btn   = item.querySelector('.chat-history-rename-btn');
+  // Replace label with input
+  const input = document.createElement('input');
+  input.className = 'chat-history-rename-input';
+  input.value = conv.title;
+  label.replaceWith(input);
+  btn.style.display = 'none';
+  input.focus();
+  input.select();
+  const save = async () => {
+    const newTitle = input.value.trim() || conv.title;
+    conv.title = newTitle;
+    await fetch(`/api/chat-history/${enc(activeCourse)}/rename`, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ id: conv.id, title: newTitle }),
+    });
+    // Restore label
+    const newLabel = document.createElement('span');
+    newLabel.className = 'chat-history-item-label';
+    newLabel.textContent = newTitle;
+    newLabel.onclick = () => _chatHistoryLoad_open(idx);
+    input.replaceWith(newLabel);
+    btn.style.display = '';
+  };
+  input.addEventListener('blur', save);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    if (e.key === 'Escape') { input.value = conv.title; input.blur(); }
+  });
 }
 
 function _chatHistoryLoad_open(idx) {
