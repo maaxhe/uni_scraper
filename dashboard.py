@@ -5672,12 +5672,15 @@ async function _chatHistoryLoad() {
 
 function _chatHistoryLoad_open(json) {
   const conv = JSON.parse(json);
-  chatHistory = conv.messages;
+  chatHistory = [...conv.messages];
+  // Clear messages and replay the full conversation
   const msgs = document.getElementById('chat-messages');
-  // Append a divider then replay messages
-  msgs.innerHTML += `<div style="text-align:center;font-size:11px;color:var(--text3);margin:12px 0;border-top:1px solid var(--border);padding-top:8px">— ${esc(conv.title)} —</div>`;
+  msgs.innerHTML = `<div style="text-align:center;font-size:11px;color:var(--text3);margin:8px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)">
+    <span style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:2px 10px">${esc(conv.title)} · ${esc(conv.date)}</span>
+  </div>`;
   for (const m of conv.messages) appendChatMsg(m.role, m.content);
   document.getElementById('chat-history-panel').classList.remove('open');
+  msgs.scrollTop = msgs.scrollHeight;
 }
 
 function _chatCopyBubble(btn) {
