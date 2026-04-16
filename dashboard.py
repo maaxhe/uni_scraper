@@ -2249,10 +2249,8 @@ body {
 .chat-history-header { display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border); gap: 8px; }
 .chat-history-header h3 { flex: 1; font-size: 13px; font-weight: 700; color: var(--text); margin: 0; }
 .chat-history-list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
-.chat-history-item { padding: 10px 12px; border-radius: var(--radius); border: 1px solid var(--border); cursor: pointer; transition: background .15s; }
+.chat-history-item { padding: 10px 12px; border-radius: var(--radius); border: 1px solid var(--border); cursor: pointer; transition: background .15s; font-size: 12px; font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chat-history-item:hover { background: var(--bg3); }
-.chat-history-item-title { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.chat-history-item-meta  { font-size: 10px; color: var(--text3); }
 .chat-suggestion {
   font-size: 12px; padding: 5px 12px; background: var(--bg3); border: 1px solid var(--border);
   border-radius: 16px; cursor: pointer; color: var(--text3);
@@ -5924,23 +5922,22 @@ async function _chatHistoryLoad() {
   const data = await fetch(`/api/chat-history/${enc(activeCourse)}`).then(r => r.json());
   if (!data.length) { list.innerHTML = '<p style="padding:12px;font-size:12px;color:var(--text3)">No saved conversations yet.</p>'; return; }
   list.innerHTML = data.map(c => `
-    <div class="chat-history-item" onclick="_chatHistoryLoad_open(${JSON.stringify(JSON.stringify(c))})">
-      <div class="chat-history-item-title">${esc(c.title)}</div>
-      <div class="chat-history-item-meta">${esc(c.date)} · ${c.messages.length} messages</div>
-    </div>`).join('');
+    <div class="chat-history-item" onclick="_chatHistoryLoad_open(${JSON.stringify(JSON.stringify(c))})">${esc(c.title)}</div>`).join('');
 }
 
 function _chatHistoryLoad_open(json) {
   const conv = JSON.parse(json);
   chatHistory = [...conv.messages];
-  // Clear messages and replay the full conversation
   const msgs = document.getElementById('chat-messages');
-  msgs.innerHTML = `<div style="text-align:center;font-size:11px;color:var(--text3);margin:8px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--border)">
-    <span style="background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:2px 10px">${esc(conv.title)} · ${esc(conv.date)}</span>
-  </div>`;
+  msgs.innerHTML = '';
   for (const m of conv.messages) appendChatMsg(m.role, m.content);
   document.getElementById('chat-history-panel').classList.remove('open');
   msgs.scrollTop = msgs.scrollHeight;
+  // Re-enable input so the user can continue the conversation
+  const input = document.getElementById('chat-input');
+  const sendBtn = document.getElementById('chat-send-btn');
+  if (input) { input.disabled = false; input.focus(); }
+  if (sendBtn) sendBtn.disabled = false;
 }
 
 function _chatCopyBubble(btn) {
