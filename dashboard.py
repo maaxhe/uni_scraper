@@ -5640,7 +5640,7 @@ function toggleFileNotes() {
   if (btn) btn.style.color = _fileNotesOpen ? 'var(--blue)' : 'var(--text3)';
 }
 
-const FNOTES_DEFAULT = '## Fragen\n\n- [ ] \n\n## Notizen\n\n';
+const FNOTES_DEFAULT = '## Questions\n\n- [ ] \n\n## Notes\n\n';
 
 // Called whenever a new file is selected in the preview
 async function _loadFileNote(filename) {
