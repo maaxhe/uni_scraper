@@ -261,12 +261,32 @@ def api_courses():
     last_sync = int(COURSES_JSON.stat().st_mtime) if COURSES_JSON.exists() else None
     return jsonify({"tree": data, "last_sync": last_sync})
 
+def _old_material_paths(course_name: str) -> set:
+    """
+    For a semester-scoped course (e.g. 'SoSe 2026/Neurodynamics') return the
+    set of relative file paths that also exist under 'Alle Kurse/<basename>'.
+    These are files the professor carried over from previous offerings.
+    Returns an empty set for courses not nested in a semester folder.
+    """
+    parts = course_name.rstrip("/").split("/")
+    if len(parts) < 2:
+        return set()
+    basename = parts[-1]
+    alle_dir = COURSES_DIR / "Alle Kurse" / basename
+    if not alle_dir.is_dir():
+        return set()
+    return set(list_files(alle_dir))
+
 @app.route("/api/files/<path:course_name>")
 def api_files(course_name):
     d = COURSES_DIR / course_name
     if not d.is_dir():
-        return jsonify([])
-    return jsonify(list_files(d))
+        return jsonify({"files": [], "old_files": []})
+    all_files = list_files(d)
+    old_set   = _old_material_paths(course_name)
+    old_files     = [f for f in all_files if f in old_set]
+    current_files = [f for f in all_files if f not in old_set]
+    return jsonify({"files": current_files, "old_files": old_files})
 
 @app.route("/api/file-text/<path:course_name>/<path:filename>")
 def api_file_text(course_name, filename):
@@ -3888,6 +3908,7 @@ let fileSort = localStorage.getItem('file_sort') || 'name';
 let activePreviewFile = null;
 let _allLoadedFiles = [];
 let _allLoadedMeta  = {};
+let _oldFiles       = new Set(); // paths that are old course material (from Alle Kurse)
 
 function filterFileList(q) {
   const clearBtn = document.getElementById('file-search-clear');
@@ -3924,20 +3945,41 @@ function _renderFileListWithFilter(q) {
     el.innerHTML = banner + matches.map(f => {
       const m = _allLoadedMeta[f] || {};
       const isNew = summaryAge && m.mtime && m.mtime > summaryAge;
+      const isOld = _oldFiles.has(f);
       const read = isFileRead(activeCourse, f);
-      const displayName = f; // show full path so context is clear
       return `
         <div class="file-item${isNew ? ' new-file' : ''}${read ? ' file-read' : ''}" data-filename="${esc(f)}"
-             style="padding-left:8px" onclick="previewFileFromEl(this)">
+             style="padding-left:8px${isOld ? ';opacity:.7' : ''}" onclick="previewFileFromEl(this)">
           <input type="checkbox" name="file" value="${esc(f)}" checked onclick="event.stopPropagation()" onchange="if(selectionMode)updateSelectionToolbar()">
           <span class="file-icon">${fileIcon(f)}</span>
-          <span class="file-name" title="${esc(f)}">${esc(displayName)}</span>
+          <span class="file-name" title="${esc(f)}">${esc(f)}</span>
+          ${isOld ? '<span class="new-badge" style="flex-shrink:0;background:var(--bg4);color:var(--text3)">old</span>' : ''}
           ${isNew ? '<span class="new-badge" style="flex-shrink:0">New</span>' : ''}
           <span class="file-read-check">${read ? '✓' : ''}</span>
         </div>`;
     }).join('');
   } else {
-    el.innerHTML = banner + renderFileTree(buildFileTree(_allLoadedFiles), _allLoadedFiles, summaryAge, _allLoadedMeta, 0);
+    const currentFiles = _allLoadedFiles.filter(f => !_oldFiles.has(f));
+    let html = renderFileTree(buildFileTree(currentFiles), currentFiles, summaryAge, _allLoadedMeta, 0);
+
+    // Old course material section — collapsed by default
+    if (_oldFiles.size > 0) {
+      const oldArr = [..._oldFiles];
+      const isOpen = _expandedFolders.has('__old_material__');
+      html += `
+      <div class="folder-item old-material-header${isOpen ? '' : ' collapsed'}" style="padding-left:8px;margin-top:10px;border-top:1px solid var(--border);padding-top:8px"
+           onclick="toggleFileFolder('__old_material__', this)">
+        <span class="folder-chevron">▼</span>
+        <span class="folder-icon">📦</span>
+        <span class="folder-name" style="color:var(--text3)">Old Course Material</span>
+        <span class="folder-count" style="color:var(--text3)">${oldArr.length}</span>
+      </div>
+      <div class="folder-contents${isOpen ? '' : ' collapsed'}" data-folder="__old_material__" style="opacity:.7">
+        ${renderFileTree(buildFileTree(oldArr), oldArr, summaryAge, _allLoadedMeta, 0)}
+      </div>`;
+    }
+
+    el.innerHTML = banner + html;
   }
 }
 
@@ -3950,12 +3992,17 @@ function setFileSort(val) {
 }
 
 async function loadFiles() {
-  const [files, meta] = await Promise.all([
+  const [data, meta] = await Promise.all([
     fetch(`/api/files/${enc(activeCourse)}`).then(r => r.json()),
     fetch(`/api/file-meta/${enc(activeCourse)}`).then(r => r.json()).catch(() => []),
   ]);
   const el = document.getElementById('file-list');
-  if (!files.length) {
+
+  // Support both new {files, old_files} format and legacy plain array
+  const files    = Array.isArray(data) ? data : (data.files    || []);
+  const oldFiles = Array.isArray(data) ? []   : (data.old_files || []);
+
+  if (!files.length && !oldFiles.length) {
     el.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:8px">No files</div>';
     return;
   }
@@ -3965,12 +4012,14 @@ async function loadFiles() {
   const sel = document.getElementById('file-sort-select');
   if (sel) sel.value = fileSort;
   if (fileSort === 'date') {
-    files.sort((a, b) => (metaMap[b]?.mtime || 0) - (metaMap[a]?.mtime || 0));
+    files.sort((a, b)    => (metaMap[b]?.mtime || 0) - (metaMap[a]?.mtime || 0));
+    oldFiles.sort((a, b) => (metaMap[b]?.mtime || 0) - (metaMap[a]?.mtime || 0));
   }
 
-  // Store for filtering
-  _allLoadedFiles = files;
+  // Store for filtering (search covers both sets)
+  _allLoadedFiles = [...files, ...oldFiles];
   _allLoadedMeta  = metaMap;
+  _oldFiles       = new Set(oldFiles);
 
   // Clear search box on course change
   const searchInp = document.getElementById('file-search');
@@ -3982,7 +4031,7 @@ async function loadFiles() {
 
   // Re-open last viewed file
   const lastFile = localStorage.getItem('last_file__' + activeCourse);
-  if (lastFile && files.includes(lastFile)) {
+  if (lastFile && _allLoadedFiles.includes(lastFile)) {
     previewFile(lastFile);
   }
 }
