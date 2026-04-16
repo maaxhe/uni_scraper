@@ -2222,6 +2222,26 @@ body {
 .chat-suggestions { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 40px 14px; }
 .chat-toolbar { display: flex; gap: 6px; padding: 8px 16px 0; justify-content: flex-end; }
 .chat-toolbar button { font-size: 11px; }
+.chat-context-bar {
+  display: flex; align-items: center; gap: 8px; padding: 6px 24px 0;
+  flex-shrink: 0;
+}
+.chat-context-label { font-size: 11px; color: var(--text3); white-space: nowrap; }
+.chat-context-select {
+  flex: 1; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  color: var(--text); font-size: 12px; padding: 5px 10px; outline: none; cursor: pointer;
+  transition: border-color var(--transition);
+}
+.chat-context-select:focus { border-color: var(--blue); }
+.chat-file-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: var(--blue); color: #fff; font-size: 11px; font-weight: 600;
+  border-radius: 20px; padding: 2px 10px 2px 8px; margin: 0 24px 6px;
+  flex-shrink: 0; max-width: calc(100% - 48px); overflow: hidden;
+}
+.chat-file-pill span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-file-pill button { background: none; border: none; color: rgba(255,255,255,.7); cursor: pointer; font-size: 12px; padding: 0; line-height: 1; }
+.chat-file-pill button:hover { color: #fff; }
 .chat-history-panel { position: absolute; top: 0; right: 0; bottom: 0; width: 280px; background: var(--bg2); border-left: 1px solid var(--border); display: flex; flex-direction: column; z-index: 10; transform: translateX(100%); transition: transform .2s ease; }
 .chat-history-panel.open { transform: translateX(0); }
 .chat-history-header { display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border); gap: 8px; }
@@ -5767,6 +5787,7 @@ function toggleNotesPreview() {
 // ═══════════════════════════════════════════════════════════════════════════
 let chatHistory = [];   // [{role, content}]
 let chatStreaming = false;
+let chatContextFile = '';  // filename of currently selected file context ('' = summary)
 
 const CHAT_SUGGESTIONS = [
   'What are the most important concepts?',
@@ -5776,8 +5797,9 @@ const CHAT_SUGGESTIONS = [
   'What connects to this topic?',
 ];
 
-function loadChat() {
+async function loadChat() {
   chatHistory = [];
+  chatContextFile = '';
   const course = allCourses.find(c => c.path === activeCourse);
   const hasSummary = course?.has_summary;
   document.getElementById('chat-body').innerHTML = `
@@ -5790,9 +5812,9 @@ function loadChat() {
       <div class="chat-messages" id="chat-messages">
         <div class="chat-msg">
           <div class="chat-avatar">🤖</div>
-          <div class="chat-bubble">
+          <div class="chat-bubble" id="chat-welcome-bubble">
             ${hasSummary
-              ? `Hi! I know the summary of <strong>${esc(activeCourse.split('/').pop())}</strong>. What would you like to know?`
+              ? `Hi! I'm using the <strong>summary</strong> of <strong>${esc(activeCourse.split('/').pop())}</strong> as context. Select a specific file below to ask about it directly.`
               : `No summary exists for this course yet. Create one under "Files" first so I can help you.`}
           </div>
         </div>
@@ -5800,6 +5822,13 @@ function loadChat() {
       ${hasSummary ? `<div class="chat-suggestions" id="chat-suggestions">
         ${CHAT_SUGGESTIONS.map(s => `<button class="chat-suggestion" onclick="sendSuggestion('${esc(s)}')">${esc(s)}</button>`).join('')}
       </div>` : ''}
+      <div class="chat-context-bar" id="chat-context-bar">
+        <span class="chat-context-label">Context:</span>
+        <select class="chat-context-select" id="chat-context-select" onchange="_chatContextChange(this.value)">
+          <option value="">Summary (default)</option>
+        </select>
+      </div>
+      <div id="chat-file-pill-row"></div>
       <div class="chat-input-row">
         <textarea id="chat-input" placeholder="Ask a question… (Enter to send, Shift+Enter for newline)"
           ${hasSummary ? '' : 'disabled'}
@@ -5814,6 +5843,36 @@ function loadChat() {
         <div class="chat-history-list" id="chat-history-list">Loading…</div>
       </div>
     </div>`;
+  // Populate file dropdown
+  try {
+    const files = await fetch(`/api/file-meta/${enc(activeCourse)}`).then(r => r.json());
+    const sel = document.getElementById('chat-context-select');
+    if (sel && files.length) {
+      for (const f of files) {
+        const opt = document.createElement('option');
+        opt.value = f.name;
+        opt.textContent = f.name;
+        sel.appendChild(opt);
+      }
+    }
+  } catch {}
+}
+
+function _chatContextChange(value) {
+  chatContextFile = value;
+  const pillRow = document.getElementById('chat-file-pill-row');
+  const welcome = document.getElementById('chat-welcome-bubble');
+  const courseName = (activeCourse || '').split('/').pop();
+  if (value) {
+    pillRow.innerHTML = `<div class="chat-file-pill">
+      <span>📄 ${esc(value)}</span>
+      <button onclick="_chatContextChange(''); document.getElementById('chat-context-select').value=''" title="Clear">✕</button>
+    </div>`;
+    if (welcome) welcome.innerHTML = `Asking about <strong>${esc(value)}</strong>. I'll read the raw file content as context.`;
+  } else {
+    pillRow.innerHTML = '';
+    if (welcome) welcome.innerHTML = `Hi! I'm using the <strong>summary</strong> of <strong>${esc(courseName)}</strong> as context. Select a specific file below to ask about it directly.`;
+  }
 }
 
 function _chatMdExport() {
@@ -5929,10 +5988,12 @@ async function sendChat() {
 
   let fullAnswer = '';
   try {
+    const body = { question, history: chatHistory.slice(0, -1) };
+    if (chatContextFile) body.file = chatContextFile;
     const resp = await fetch(`/api/chat/${enc(activeCourse)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, history: chatHistory.slice(0, -1) })
+      body: JSON.stringify(body)
     });
 
     const reader = resp.body.getReader();
@@ -6561,18 +6622,37 @@ initWelcome();
 def api_chat(course_name):
     from anthropic import Anthropic
     from flask import Response, stream_with_context
-    question = request.json.get("question", "").strip()
-    history  = request.json.get("history", [])   # [{role, content}, …]
+    question  = request.json.get("question", "").strip()
+    history   = request.json.get("history", [])   # [{role, content}, …]
+    file_name = request.json.get("file", "").strip()
     if not question:
         return jsonify({"error": "No question provided"}), 400
 
-    course_dir   = COURSES_DIR / course_name
-    summary_path = get_latest_summary(course_dir)
-    notes_path   = course_dir / NOTES_FILENAME
-    context = summary_path.read_text(encoding="utf-8")[:10000] if summary_path and summary_path.exists() else ""
-    notes   = notes_path.read_text(encoding="utf-8")[:3000]    if notes_path.exists()   else ""
+    course_dir = COURSES_DIR / course_name
+    notes_path = course_dir / NOTES_FILENAME
+    notes      = notes_path.read_text(encoding="utf-8")[:3000] if notes_path.exists() else ""
 
-    system = f"""You are a concise study assistant for the course "{course_name.split('/')[-1]}". \
+    if file_name:
+        # Use raw file text as context
+        from summarize import extract_text as _extract_text
+        file_path = course_dir / file_name
+        raw_text  = _extract_text(file_path)[:15000] if file_path.exists() else ""
+        system = f"""You are a concise study assistant for the course "{course_name.split('/')[-1]}". \
+Always respond in English, keep answers brief and learning-focused.
+
+The user is asking about the specific file: {file_name}
+
+<file_content>
+{raw_text or "Could not extract text from this file."}
+</file_content>
+{f"<notes>{notes}</notes>" if notes else ""}
+
+Answer questions based solely on the file content above. \
+If something is not covered in the file, say so."""
+    else:
+        summary_path = get_latest_summary(course_dir)
+        context = summary_path.read_text(encoding="utf-8")[:10000] if summary_path and summary_path.exists() else ""
+        system = f"""You are a concise study assistant for the course "{course_name.split('/')[-1]}". \
 Always respond in English, keep answers brief and learning-focused.
 
 <course_summary>
