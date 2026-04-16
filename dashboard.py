@@ -2298,8 +2298,9 @@ body {
 /* ── Summary ToC ── */
 .summary-layout { display: flex; gap: 28px; align-items: flex-start; }
 .summary-toc {
-  width: 190px; min-width: 160px; flex-shrink: 0;
-  position: sticky; top: 0; align-self: flex-start; padding-bottom: 20px;
+  width: 200px; min-width: 160px; flex-shrink: 0;
+  position: sticky; top: 16px; align-self: flex-start;
+  max-height: calc(100vh - 120px); overflow-y: auto; padding-bottom: 20px;
 }
 .summary-toc-title {
   font-size: 9px; text-transform: uppercase; letter-spacing: .1em;
@@ -6268,16 +6269,18 @@ function _buildAndInjectToC() {
   if (!layout || !contentEl) return;
 
   const headings = [...contentEl.querySelectorAll('h2, h3')];
-  if (headings.length < 3) return; // too short to be worth a ToC
+  if (headings.length < 1) return;
 
-  let html = '<div class="summary-toc"><div class="summary-toc-title">Inhalt</div>';
+  let html = '<div class="summary-toc"><div class="summary-toc-title">Contents</div>';
   headings.forEach((h, i) => {
     const id = `sh-${i}`;
     h.id = id;
     const cls = h.tagName === 'H3' ? 'toc-h3' : '';
+    // Strip "File N: " prefix from h2 labels so they're short and clean
+    let label = h.textContent.trim().replace(/^File\s+\d+:\s*/i, '').replace(/^\[|\]$/g, '');
     html += `<a class="toc-link ${cls}" data-hid="${id}" href="#"
       onclick="event.preventDefault();_scrollToSummaryHeading('${id}')"
-      >${esc(h.textContent.trim())}</a>`;
+      title="${esc(h.textContent.trim())}">${esc(label)}</a>`;
   });
   html += '</div>';
 
