@@ -5817,6 +5817,34 @@ const CHAT_SUGGESTIONS = [
   'What connects to this topic?',
 ];
 
+function _chatNew() {
+  if (chatStreaming) return;
+  chatHistory = [];
+  chatContextFile = '';
+  // Reset context selector
+  const sel = document.getElementById('chat-context-select');
+  if (sel) sel.value = '';
+  document.getElementById('chat-file-pill-row').innerHTML = '';
+  // Clear messages and show welcome bubble again
+  const course = allCourses.find(c => c.path === activeCourse);
+  const courseName = (activeCourse || '').split('/').pop();
+  const msgs = document.getElementById('chat-messages');
+  msgs.innerHTML = `<div class="chat-msg">
+    <div class="chat-avatar">🤖</div>
+    <div class="chat-bubble" id="chat-welcome-bubble">
+      Hi! I'm using the <strong>summary</strong> of <strong>${esc(courseName)}</strong> as context. Select a specific file below to ask about it directly.
+    </div>
+  </div>`;
+  // Re-add suggestions if they were removed
+  if (course?.has_summary && !document.getElementById('chat-suggestions')) {
+    const suggDiv = document.createElement('div');
+    suggDiv.className = 'chat-suggestions';
+    suggDiv.id = 'chat-suggestions';
+    suggDiv.innerHTML = CHAT_SUGGESTIONS.map(s => `<button class="chat-suggestion" onclick="sendSuggestion('${esc(s)}')">${esc(s)}</button>`).join('');
+    msgs.after(suggDiv);
+  }
+}
+
 async function loadChat() {
   chatHistory = [];
   chatContextFile = '';
@@ -5825,6 +5853,7 @@ async function loadChat() {
   document.getElementById('chat-body').innerHTML = `
     <div class="chat-layout" style="position:relative">
       <div class="chat-toolbar">
+        <button class="tbtn btn-gray" style="font-size:11px" onclick="_chatNew()">＋ New</button>
         <button class="tbtn btn-gray" style="font-size:11px" onclick="_chatSave()">💾 Save</button>
         <button class="tbtn btn-gray" style="font-size:11px" onclick="_chatDownload()">⬇ Download</button>
         <button class="tbtn btn-gray" style="font-size:11px" onclick="_chatHistoryToggle()">🕘 History</button>
