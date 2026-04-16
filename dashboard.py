@@ -2152,6 +2152,8 @@ body {
 
 /* Chat panel — NO display override here, uses .panel base class */
 #panel-chat { padding: 0; overflow: hidden; }
+#panel-chat.active { display: flex; flex-direction: column; }
+#chat-body { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 
 /* Course info panel */
 .info-card { background: var(--bg2); border: 1px solid var(--border); border-radius: 10px; padding: 20px 24px; margin-bottom: 14px; }
@@ -2172,7 +2174,7 @@ body {
 .custom-info-row textarea { resize: vertical; min-height: 30px; line-height: 1.5; }
 .custom-info-del { background: none; border: none; cursor: pointer; color: var(--text3); font-size: 13px; padding: 4px; border-radius: 4px; transition: color .15s; margin-top: 2px; }
 .custom-info-del:hover { color: var(--red); }
-.chat-layout { display: flex; flex-direction: column; height: 100%; }
+.chat-layout { display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .chat-messages {
   flex: 1; overflow-y: auto; padding: 28px 40px; display: flex; flex-direction: column; gap: 18px;
 }
