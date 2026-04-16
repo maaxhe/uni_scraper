@@ -233,14 +233,19 @@ def parse_flashcards(qa_md: str) -> list[dict]:
             })
     return cards
 
+_TAIL_BYTES = 8192  # read only the last 8 KB of the log — enough for recent timestamps
+
 def get_pipeline_status() -> dict:
     log_path = Path(PIPELINE_LOG)
     last_run = None
     last_ok  = None
     if log_path.exists():
-        content = log_path.read_text(encoding="utf-8", errors="replace")
-        runs = re.findall(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) Pipeline gestartet', content)
-        ends = re.findall(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) Pipeline beendet', content)
+        size = log_path.stat().st_size
+        with log_path.open("rb") as fh:
+            fh.seek(max(0, size - _TAIL_BYTES))
+            tail = fh.read().decode("utf-8", errors="replace")
+        runs = re.findall(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) Pipeline gestartet', tail)
+        ends = re.findall(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) Pipeline beendet', tail)
         last_run = runs[-1] if runs else None
         last_ok  = ends[-1] if ends else None
     return {"last_run": last_run, "last_ok": last_ok}
@@ -4144,8 +4149,10 @@ async function previewFile(filename) {
   // Save scroll position of the file we're leaving
   _saveScrollPos();
   // Tear down any active PDF so the ResizeObserver can't re-render it into a non-PDF view
+  if (_pdfLazyObs) { _pdfLazyObs.disconnect(); _pdfLazyObs = null; }
   if (_pdfRO) { _pdfRO.disconnect(); _pdfRO = null; }
   if (_pdfDoc) { _pdfDoc.destroy(); _pdfDoc = null; }
+  _pdfPages = [];
   pdfFindClose();
   activePreviewFile = filename;
   localStorage.setItem('last_file__' + activeCourse, filename);
@@ -4286,12 +4293,13 @@ let _pdfUrl      = '';
 let _pdfScale    = null;  // null = auto-fit to container width
 let _pdfDoc      = null;
 let _pdfRO       = null, _pdfROTimer = null;
-let _pdfGen      = 0;    // generation counter — incremented on every new render request
+let _pdfGen      = 0;    // generation counter — incremented on every layout rebuild
+let _pdfPages    = [];   // all PDF.js page objects (lightweight, no canvas memory)
+let _pdfLazyObs  = null; // IntersectionObserver driving on-demand page rendering
 
 // Returns the scale that fills the container width exactly.
 function _pdfAutoScale(container) {
   if (!_pdfDoc) return 1;
-  // Use cached viewport from first page (already fetched as _pdfPage1Vp)
   const w = container.clientWidth - 16;
   return w > 0 ? w / _pdfPage1Width : 1;
 }
@@ -4299,103 +4307,114 @@ let _pdfPage1Width = 0; // natural width of page 1 at scale=1
 
 async function _loadPdfJs(container) {
   if (_pdfDoc) { _pdfDoc.destroy(); _pdfDoc = null; }
+  _pdfPages = [];
+  if (_pdfLazyObs) { _pdfLazyObs.disconnect(); _pdfLazyObs = null; }
   try {
     _pdfDoc = await pdfjsLib.getDocument(_pdfUrl).promise;
   } catch(e) {
     container.innerHTML = `<div style="color:var(--red);padding:20px">Error: ${e.message}</div>`;
     return;
   }
-  // Cache page-1 natural width so _pdfAutoScale() doesn't need to be async.
-  const p1 = await _pdfDoc.getPage(1);
-  _pdfPage1Width = p1.getViewport({ scale: 1 }).width;
+  // Pre-load all page objects — lightweight, no canvas memory allocated yet.
+  for (let i = 1; i <= _pdfDoc.numPages; i++) {
+    _pdfPages.push(await _pdfDoc.getPage(i));
+  }
+  _pdfPage1Width = _pdfPages[0].getViewport({ scale: 1 }).width;
 
   // Wait for the browser to finish laying out the container so clientWidth is real.
   await new Promise(r => requestAnimationFrame(r));
   await new Promise(r => requestAnimationFrame(r)); // two frames to be sure
 
-  await _renderPdf(container);
+  _buildPdfLayout(container);
 }
 
-async function _renderPdf(container) {
-  if (!_pdfDoc) return;
-  const gen = ++_pdfGen; // any concurrent render with a smaller gen is stale
-
-  const containerWidth = container.clientWidth;
-  if (!containerWidth) return;
+// Build placeholder divs for every page and wire up lazy rendering.
+// Called on initial load, zoom change, and container resize.
+function _buildPdfLayout(container) {
+  if (!_pdfDoc || !_pdfPages.length) return;
+  if (!container.clientWidth) return;
+  const gen = ++_pdfGen;
   const scale = _pdfScale !== null ? _pdfScale : _pdfAutoScale(container);
+  const dpr   = window.devicePixelRatio || 1;
 
-  // Collect all page objects first (fast, no rendering yet)
-  const pages = [];
-  for (let i = 1; i <= _pdfDoc.numPages; i++) {
-    pages.push(await _pdfDoc.getPage(i));
-  }
-  if (gen !== _pdfGen) return; // superseded
+  // Stop previous lazy observer so stale renders don't race.
+  if (_pdfLazyObs) { _pdfLazyObs.disconnect(); _pdfLazyObs = null; }
 
-  // Render all pages into an off-screen DocumentFragment first, then
-  // atomically swap — canvas rendering works without being in the DOM,
-  // so the old content stays visible until everything is ready.
+  // Create one lightweight placeholder div per page (no canvas = no memory).
   const fragment = document.createDocumentFragment();
-  const dpr = window.devicePixelRatio || 1;
-
-  for (const page of pages) {
-    if (gen !== _pdfGen) return; // superseded mid-render
-    const viewport = page.getViewport({ scale: scale * dpr }); // render at physical pixels
-    const cssW = (viewport.width  / dpr) + 'px';
-    const cssH = (viewport.height / dpr) + 'px';
-
-    // Wrapper — relative so text layer can be absolutely positioned on top
+  for (const page of _pdfPages) {
+    const vp = page.getViewport({ scale });
     const wrapper = document.createElement('div');
     wrapper.className = 'pdf-page-wrapper';
-    wrapper.style.width  = cssW;
-    wrapper.style.height = cssH;
-
-    const canvas     = document.createElement('canvas');
-    canvas.className = 'pdf-page-canvas';
-    canvas.width     = viewport.width;  // physical pixel size
-    canvas.height    = viewport.height;
-    canvas.style.width  = cssW;
-    canvas.style.height = cssH;
-    wrapper.appendChild(canvas);
-
-    // Text layer for selection
-    const textLayer = document.createElement('div');
-    textLayer.className = 'textLayer';
-    textLayer.style.width  = cssW;
-    textLayer.style.height = cssH;
-    wrapper.appendChild(textLayer);
-
+    wrapper.style.width  = vp.width  + 'px';
+    wrapper.style.height = vp.height + 'px';
     fragment.appendChild(wrapper);
-
-    // Render canvas while it's still off-screen (works fine without being in the DOM)
-    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-    if (gen !== _pdfGen) return;
-
-    // Text layer at CSS scale so positions match CSS pixels
-    const cssViewport = page.getViewport({ scale });
-    try {
-      const textContent = await page.getTextContent();
-      if (gen !== _pdfGen) return;
-      if (pdfjsLib.renderTextLayer) {
-        pdfjsLib.renderTextLayer({
-          textContentSource: textContent,
-          container: textLayer,
-          viewport: cssViewport,
-          textDivs: [],
-        });
-      }
-    } catch(_) { /* text layer is best-effort */ }
   }
-
-  if (gen !== _pdfGen) return;
-
-  // Atomic swap — old pages stay visible until all new pages are fully painted
   container.innerHTML = '';
   container.appendChild(fragment);
 
   _updateZoomLabel(container, scale);
   _setupPdfPageIndicator(container);
-  // Re-apply any active find highlights after re-render
+
+  const wrappers = [...container.querySelectorAll('.pdf-page-wrapper')];
+
+  // Render each page on demand as it enters the viewport (400 px preload buffer).
+  _pdfLazyObs = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      if (!entry.isIntersecting || entry.target.dataset.rendered) return;
+      entry.target.dataset.rendered = '1';
+      _pdfLazyObs.unobserve(entry.target);
+      const idx = wrappers.indexOf(entry.target);
+      if (idx >= 0) _renderPageLazy(entry.target, idx, scale, dpr, gen);
+    });
+  }, { rootMargin: '400px 0px' });
+
+  wrappers.forEach(w => _pdfLazyObs.observe(w));
+
   if (_pdfFindTerm) requestAnimationFrame(() => pdfFindRun(_pdfFindTerm));
+}
+
+// Render a single page's canvas + text layer into its wrapper div.
+async function _renderPageLazy(wrapper, idx, scale, dpr, gen) {
+  if (gen !== _pdfGen || !_pdfPages[idx]) return;
+  const page     = _pdfPages[idx];
+  const viewport = page.getViewport({ scale: scale * dpr });
+  const cssW = (viewport.width  / dpr) + 'px';
+  const cssH = (viewport.height / dpr) + 'px';
+
+  const canvas = document.createElement('canvas');
+  canvas.className = 'pdf-page-canvas';
+  canvas.width  = viewport.width;
+  canvas.height = viewport.height;
+  canvas.style.width  = cssW;
+  canvas.style.height = cssH;
+  wrapper.appendChild(canvas);
+
+  const textLayer = document.createElement('div');
+  textLayer.className = 'textLayer';
+  textLayer.style.width  = cssW;
+  textLayer.style.height = cssH;
+  wrapper.appendChild(textLayer);
+
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+  if (gen !== _pdfGen) { wrapper.innerHTML = ''; return; }
+
+  const cssViewport = page.getViewport({ scale });
+  try {
+    const textContent = await page.getTextContent();
+    if (gen !== _pdfGen) return;
+    if (pdfjsLib.renderTextLayer) {
+      pdfjsLib.renderTextLayer({
+        textContentSource: textContent,
+        container: textLayer,
+        viewport: cssViewport,
+        textDivs: [],
+      });
+    }
+  } catch(_) { /* text layer is best-effort */ }
+
+  // Re-run find highlights now that this page's text layer is available.
+  if (_pdfFindTerm) pdfFindRun(_pdfFindTerm);
 }
 
 let _pdfPageObserver = null;
@@ -4405,19 +4424,18 @@ function _setupPdfPageIndicator(container) {
   _pdfPageRatios.clear();
   const ind = document.getElementById('pdf-page-ind');
   if (!ind || !_pdfDoc) return;
-  const canvases = [...container.querySelectorAll('.pdf-page-canvas')];
-  ind.textContent = `1 / ${canvases.length}`;
+  // Use wrapper divs (always present) instead of canvases (lazy).
+  const wrappers = [...container.querySelectorAll('.pdf-page-wrapper')];
+  ind.textContent = `1 / ${wrappers.length}`;
   _pdfPageObserver = new IntersectionObserver(entries => {
-    // Update the persistent ratio map for every changed entry
     entries.forEach(e => _pdfPageRatios.set(e.target, e.intersectionRatio));
-    // Pick the canvas with the highest visible ratio across ALL observed canvases
-    let bestCanvas = null, bestRatio = -1;
-    _pdfPageRatios.forEach((ratio, canvas) => {
-      if (ratio > bestRatio) { bestRatio = ratio; bestCanvas = canvas; }
+    let bestWr = null, bestRatio = -1;
+    _pdfPageRatios.forEach((ratio, wr) => {
+      if (ratio > bestRatio) { bestRatio = ratio; bestWr = wr; }
     });
-    if (bestCanvas) ind.textContent = `${canvases.indexOf(bestCanvas) + 1} / ${canvases.length}`;
+    if (bestWr) ind.textContent = `${wrappers.indexOf(bestWr) + 1} / ${wrappers.length}`;
   }, { root: container, threshold: Array.from({length: 11}, (_, i) => i * 0.1) });
-  canvases.forEach(c => { _pdfPageRatios.set(c, 0); _pdfPageObserver.observe(c); });
+  wrappers.forEach(w => { _pdfPageRatios.set(w, 0); _pdfPageObserver.observe(w); });
 }
 
 function _updateZoomLabel(container, scale) {
@@ -4434,7 +4452,7 @@ function _updateZoomLabel(container, scale) {
 function applyPdfZoom() {
   const body = document.getElementById('preview-body');
   if (!body || !_pdfDoc) return;
-  _renderPdf(body);
+  _buildPdfLayout(body);
 }
 
 function changePdfZoom(delta) {
@@ -4443,7 +4461,7 @@ function changePdfZoom(delta) {
   // Resolve current scale (auto → actual number) before applying delta
   const current = _pdfScale !== null ? _pdfScale : _pdfAutoScale(body);
   _pdfScale = Math.min(5, Math.max(0.1, current * (1 + delta / 100)));
-  _renderPdf(body);
+  _buildPdfLayout(body);
 }
 
 function _setupPdfResizeObserver(body) {
@@ -4453,7 +4471,7 @@ function _setupPdfResizeObserver(body) {
     clearTimeout(_pdfROTimer);
     _pdfROTimer = setTimeout(() => {
       const b = document.getElementById('preview-body');
-      if (b && _pdfDoc) _renderPdf(b);
+      if (b && _pdfDoc) _buildPdfLayout(b);
     }, 150);
   });
   _pdfRO.observe(body);
