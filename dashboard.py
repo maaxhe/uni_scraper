@@ -391,7 +391,8 @@ def _collect_flashcards(rel_path: str, d: Path) -> list:
         c["id"] = f"{rel_path}::{c['id']}"
     return cards
 
-CUSTOM_CARDS_FILE = "_custom_cards.json"
+CUSTOM_CARDS_FILE  = "_custom_cards.json"
+CHAT_HISTORY_FILE  = "_chat_history.json"
 
 @app.route("/api/custom-cards/<path:course_name>", methods=["GET"])
 def api_get_custom_cards(course_name):
@@ -419,6 +420,28 @@ def api_save_srs(course_name):
     p = COURSES_DIR / course_name / "_srs.json"
     p.write_text(json.dumps(request.json, ensure_ascii=False, indent=2), encoding="utf-8")
     return jsonify({"ok": True})
+
+@app.route("/api/chat-history/<path:course_name>", methods=["GET"])
+def api_get_chat_history(course_name):
+    p = COURSES_DIR / course_name / CHAT_HISTORY_FILE
+    if not p.exists():
+        return jsonify([])
+    return jsonify(json.loads(p.read_text(encoding="utf-8")))
+
+@app.route("/api/chat-history/<path:course_name>", methods=["POST"])
+def api_save_chat_history(course_name):
+    data = request.json  # {title, messages: [{role, content}]}
+    p = COURSES_DIR / course_name / CHAT_HISTORY_FILE
+    history = json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+    entry = {
+        "id":       datetime.now().strftime("%Y%m%d_%H%M%S"),
+        "title":    data.get("title", "Conversation"),
+        "date":     datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "messages": data.get("messages", []),
+    }
+    history.insert(0, entry)   # newest first
+    p.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+    return jsonify({"ok": True, "id": entry["id"]})
 
 @app.route("/api/generate-cards/<path:course_name>", methods=["POST"])
 def api_generate_cards(course_name):
@@ -2144,6 +2167,17 @@ body {
 .chat-input-btn:hover { opacity: .85; }
 .chat-input-btn:disabled { opacity: .3; cursor: not-allowed; }
 .chat-suggestions { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 40px 14px; }
+.chat-toolbar { display: flex; gap: 6px; padding: 8px 16px 0; justify-content: flex-end; }
+.chat-toolbar button { font-size: 11px; }
+.chat-history-panel { position: absolute; top: 0; right: 0; bottom: 0; width: 280px; background: var(--bg2); border-left: 1px solid var(--border); display: flex; flex-direction: column; z-index: 10; transform: translateX(100%); transition: transform .2s ease; }
+.chat-history-panel.open { transform: translateX(0); }
+.chat-history-header { display: flex; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--border); gap: 8px; }
+.chat-history-header h3 { flex: 1; font-size: 13px; font-weight: 700; color: var(--text); margin: 0; }
+.chat-history-list { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 4px; }
+.chat-history-item { padding: 10px 12px; border-radius: var(--radius); border: 1px solid var(--border); cursor: pointer; transition: background .15s; }
+.chat-history-item:hover { background: var(--bg3); }
+.chat-history-item-title { font-size: 12px; font-weight: 600; color: var(--text); margin-bottom: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-history-item-meta  { font-size: 10px; color: var(--text3); }
 .chat-suggestion {
   font-size: 12px; padding: 5px 12px; background: var(--bg3); border: 1px solid var(--border);
   border-radius: 16px; cursor: pointer; color: var(--text3);
@@ -5548,7 +5582,12 @@ function loadChat() {
   const course = allCourses.find(c => c.path === activeCourse);
   const hasSummary = course?.has_summary;
   document.getElementById('chat-body').innerHTML = `
-    <div class="chat-layout">
+    <div class="chat-layout" style="position:relative">
+      <div class="chat-toolbar">
+        <button class="tbtn btn-gray" style="font-size:11px" onclick="_chatSave()">💾 Save</button>
+        <button class="tbtn btn-gray" style="font-size:11px" onclick="_chatDownload()">⬇ Download</button>
+        <button class="tbtn btn-gray" style="font-size:11px" onclick="_chatHistoryToggle()">🕘 History</button>
+      </div>
       <div class="chat-messages" id="chat-messages">
         <div class="chat-msg">
           <div class="chat-avatar">🤖</div>
@@ -5568,7 +5607,85 @@ function loadChat() {
           onkeydown="handleChatKey(event)" oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px'"></textarea>
         <button class="chat-input-btn" id="chat-send-btn" onclick="sendChat()" ${hasSummary ? '' : 'disabled'}>Send</button>
       </div>
+      <div class="chat-history-panel" id="chat-history-panel">
+        <div class="chat-history-header">
+          <h3>Saved conversations</h3>
+          <button class="tbtn btn-gray" style="font-size:11px;padding:3px 8px" onclick="_chatHistoryToggle()">✕</button>
+        </div>
+        <div class="chat-history-list" id="chat-history-list">Loading…</div>
+      </div>
     </div>`;
+}
+
+function _chatMdExport() {
+  if (!chatHistory.length) return null;
+  const course = (activeCourse || '').split('/').pop();
+  const date   = new Date().toLocaleString();
+  const lines  = [`# Chat — ${course}\n\n*${date}*\n`];
+  for (const m of chatHistory)
+    lines.push(`**${m.role === 'user' ? 'You' : 'AI'}:** ${m.content}\n`);
+  return lines.join('\n');
+}
+
+function _chatAutoTitle() {
+  const first = chatHistory.find(m => m.role === 'user');
+  if (!first) return 'Conversation';
+  return first.content.slice(0, 50) + (first.content.length > 50 ? '…' : '');
+}
+
+async function _chatSave() {
+  if (!chatHistory.length) { toast('Nothing to save yet', ''); return; }
+  await fetch(`/api/chat-history/${enc(activeCourse)}`, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ title: _chatAutoTitle(), messages: chatHistory }),
+  });
+  toast('Conversation saved', 'ok');
+}
+
+function _chatDownload() {
+  const md = _chatMdExport();
+  if (!md) { toast('Nothing to download yet', ''); return; }
+  const blob = new Blob([md], { type: 'text/markdown' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `chat_${(activeCourse||'').split('/').pop().replace(/\s+/g,'_')}_${Date.now()}.md`;
+  a.click();
+}
+
+function _chatHistoryToggle() {
+  const panel = document.getElementById('chat-history-panel');
+  const isOpen = panel.classList.toggle('open');
+  if (isOpen) _chatHistoryLoad();
+}
+
+async function _chatHistoryLoad() {
+  const list = document.getElementById('chat-history-list');
+  const data = await fetch(`/api/chat-history/${enc(activeCourse)}`).then(r => r.json());
+  if (!data.length) { list.innerHTML = '<p style="padding:12px;font-size:12px;color:var(--text3)">No saved conversations yet.</p>'; return; }
+  list.innerHTML = data.map(c => `
+    <div class="chat-history-item" onclick="_chatHistoryLoad_open(${JSON.stringify(JSON.stringify(c))})">
+      <div class="chat-history-item-title">${esc(c.title)}</div>
+      <div class="chat-history-item-meta">${esc(c.date)} · ${c.messages.length} messages</div>
+    </div>`).join('');
+}
+
+function _chatHistoryLoad_open(json) {
+  const conv = JSON.parse(json);
+  chatHistory = conv.messages;
+  const msgs = document.getElementById('chat-messages');
+  // Append a divider then replay messages
+  msgs.innerHTML += `<div style="text-align:center;font-size:11px;color:var(--text3);margin:12px 0;border-top:1px solid var(--border);padding-top:8px">— ${esc(conv.title)} —</div>`;
+  for (const m of conv.messages) appendChatMsg(m.role, m.content);
+  document.getElementById('chat-history-panel').classList.remove('open');
+}
+
+function _chatCopyBubble(btn) {
+  const bubble = btn.closest('.chat-msg').querySelector('.chat-bubble');
+  navigator.clipboard.writeText(bubble.innerText).then(() => {
+    btn.textContent = '✓';
+    setTimeout(() => btn.textContent = '⎘', 1200);
+  });
 }
 
 function sendSuggestion(text) {
@@ -5640,7 +5757,17 @@ async function sendChat() {
     const bubbleEl2 = document.getElementById(aiId);
     if (bubbleEl2) {
       bubbleEl2.classList.remove('streaming');
+      bubbleEl2.style.position = 'relative';
       bubbleEl2.innerHTML = chatMdToHtml(fullAnswer);
+      // Add copy button
+      const copyBtn = document.createElement('button');
+      copyBtn.textContent = '⎘';
+      copyBtn.title = 'Copy';
+      copyBtn.style.cssText = 'position:absolute;top:6px;right:6px;background:none;border:none;color:var(--text3);cursor:pointer;font-size:13px;padding:2px 4px;opacity:0;transition:opacity .15s';
+      copyBtn.onclick = () => _chatCopyBubble(copyBtn);
+      bubbleEl2.appendChild(copyBtn);
+      bubbleEl2.addEventListener('mouseenter', () => copyBtn.style.opacity = '1');
+      bubbleEl2.addEventListener('mouseleave', () => copyBtn.style.opacity = '0');
       renderLatexIn(bubbleEl2);
     }
     chatHistory.push({ role: 'assistant', content: fullAnswer });
@@ -5661,20 +5788,26 @@ function chatMdToHtml(text) {
   text = text.replace(/\$\$[\s\S]+?\$\$|\$[^$\n]+?\$/g, m => { stash.push(m); return `\x00${stash.length-1}\x00`; });
   // HTML-escape
   text = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  // Headings (must come before bold to avoid ## being eaten)
+  text = text.replace(/^### (.+)$/gm, '<h4 style="font-size:13px;font-weight:700;color:var(--text);margin:14px 0 4px">$1</h4>');
+  text = text.replace(/^## (.+)$/gm,  '<h3 style="font-size:15px;font-weight:700;color:#93c5fd;margin:16px 0 6px">$1</h3>');
+  text = text.replace(/^# (.+)$/gm,   '<h2 style="font-size:17px;font-weight:800;color:var(--text);margin:18px 0 8px">$1</h2>');
   // Inline code
-  text = text.replace(/`([^`]+)`/g, '<code>$1</code>');
+  text = text.replace(/`([^`]+)`/g, '<code style="background:var(--bg3);padding:1px 5px;border-radius:4px;font-size:12px;color:#6ee7b7">$1</code>');
   // Bold / italic
   text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   text = text.replace(/\*([^*\n]+?)\*/g, '<em>$1</em>');
-  // Bullet lists: lines starting with "- " or "* "
+  // Bullet lists
   text = text.replace(/^[ \t]*[-*] (.+)$/gm, '<li>$1</li>');
-  text = text.replace(/(<li>.*<\/li>)/s, '<ul>$1</ul>');
+  text = text.replace(/(<li>[\s\S]*?<\/li>)(?!\s*<li>)/g, '<ul style="margin:6px 0 10px 20px;line-height:1.7">$1</ul>');
   // Paragraphs
   text = text.split(/\n{2,}/).map(block => {
-    if (block.startsWith('<ul>') || block.startsWith('<li>')) return block;
+    block = block.trim();
+    if (!block) return '';
+    if (/^<(h[2-4]|ul|li)/.test(block)) return block;
     block = block.replace(/\n/g, '<br>');
     return `<p>${block}</p>`;
-  }).join('');
+  }).filter(Boolean).join('');
   // Restore LaTeX
   text = text.replace(/\x00(\d+)\x00/g, (_, i) => stash[+i]);
   return text;
@@ -5686,7 +5819,18 @@ function appendChatMsg(role, text) {
   div.className = `chat-msg ${role}`;
   const bubble = document.createElement('div');
   bubble.className = 'chat-bubble';
+  bubble.style.position = 'relative';
   bubble.innerHTML = role === 'user' ? esc(text) : chatMdToHtml(text);
+  if (role !== 'user') {
+    const copyBtn = document.createElement('button');
+    copyBtn.textContent = '⎘';
+    copyBtn.title = 'Copy';
+    copyBtn.style.cssText = 'position:absolute;top:6px;right:6px;background:none;border:none;color:var(--text3);cursor:pointer;font-size:13px;padding:2px 4px;opacity:0;transition:opacity .15s';
+    copyBtn.onclick = () => _chatCopyBubble(copyBtn);
+    bubble.appendChild(copyBtn);
+    bubble.addEventListener('mouseenter', () => copyBtn.style.opacity = '1');
+    bubble.addEventListener('mouseleave', () => copyBtn.style.opacity = '0');
+  }
   div.innerHTML = `<div class="chat-avatar">${role === 'user' ? '🧑' : '🤖'}</div>`;
   div.appendChild(bubble);
   el.appendChild(div);
