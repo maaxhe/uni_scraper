@@ -5788,6 +5788,7 @@ function toggleNotesPreview() {
 let chatHistory = [];   // [{role, content}]
 let chatStreaming = false;
 let chatContextFile = '';  // filename of currently selected file context ('' = summary)
+let _chatHistoryData = []; // loaded saved conversations, indexed by position
 
 const CHAT_SUGGESTIONS = [
   'What are the most important concepts?',
@@ -5888,7 +5889,15 @@ function _chatMdExport() {
 function _chatAutoTitle() {
   const first = chatHistory.find(m => m.role === 'user');
   if (!first) return 'Conversation';
-  return first.content.slice(0, 50) + (first.content.length > 50 ? '…' : '');
+  // Strip LaTeX, markdown bold/italic/code, and collapse whitespace
+  let t = first.content
+    .replace(/\$\$[\s\S]+?\$\$|\$[^$\n]+?\$/g, '')  // LaTeX
+    .replace(/\*\*(.+?)\*\*|__(.+?)__/g, '$1$2')      // bold
+    .replace(/\*(.+?)\*|_(.+?)_/g, '$1$2')            // italic
+    .replace(/`[^`]+`/g, '')                           // inline code
+    .replace(/\s+/g, ' ').trim();
+  if (!t) t = 'Conversation';
+  return t.slice(0, 60) + (t.length > 60 ? '…' : '');
 }
 
 async function _chatSave() {
@@ -5919,14 +5928,14 @@ function _chatHistoryToggle() {
 
 async function _chatHistoryLoad() {
   const list = document.getElementById('chat-history-list');
-  const data = await fetch(`/api/chat-history/${enc(activeCourse)}`).then(r => r.json());
-  if (!data.length) { list.innerHTML = '<p style="padding:12px;font-size:12px;color:var(--text3)">No saved conversations yet.</p>'; return; }
-  list.innerHTML = data.map(c => `
-    <div class="chat-history-item" onclick="_chatHistoryLoad_open(${JSON.stringify(JSON.stringify(c))})">${esc(c.title)}</div>`).join('');
+  _chatHistoryData = await fetch(`/api/chat-history/${enc(activeCourse)}`).then(r => r.json());
+  if (!_chatHistoryData.length) { list.innerHTML = '<p style="padding:12px;font-size:12px;color:var(--text3)">No saved conversations yet.</p>'; return; }
+  list.innerHTML = _chatHistoryData.map((c, i) => `
+    <div class="chat-history-item" onclick="_chatHistoryLoad_open(${i})">${esc(c.title)}</div>`).join('');
 }
 
-function _chatHistoryLoad_open(json) {
-  const conv = JSON.parse(json);
+function _chatHistoryLoad_open(idx) {
+  const conv = _chatHistoryData[idx];
   chatHistory = [...conv.messages];
   const msgs = document.getElementById('chat-messages');
   msgs.innerHTML = '';
