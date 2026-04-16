@@ -367,6 +367,24 @@ def api_summary_raw(course_name):
         return "Not found", 404
     return send_file(str(path), as_attachment=True, download_name=f"{course_name}_{path.name}")
 
+@app.route("/api/download-zip/<path:course_name>")
+def api_download_zip(course_name):
+    import zipfile, io
+    course_dir = COURSES_DIR / course_name
+    buf = io.BytesIO()
+    include_notes = request.args.get('notes', '0') == '1'
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for f in course_dir.rglob('*'):
+            if f.is_file() and f.suffix.lower() in SUPPORTED_EXT and not SUMMARY_RE.match(f.name) and '_qa' not in f.name:
+                zf.write(f, f.relative_to(course_dir))
+        if include_notes:
+            notes_path = course_dir / NOTES_FILENAME
+            if notes_path.exists():
+                zf.write(notes_path, NOTES_FILENAME)
+    buf.seek(0)
+    safe = re.sub(r'[^\w\-]', '_', course_name.split('/')[-1])
+    return send_file(buf, mimetype='application/zip', as_attachment=True, download_name=f'{safe}_files.zip')
+
 @app.route("/api/flashcards/<path:course_name>")
 def api_flashcards(course_name):
     summary = get_latest_summary(COURSES_DIR / course_name)
@@ -1895,6 +1913,20 @@ body {
 .srb-label { font-size: 11px; color: var(--text3); }
 .srs-next-due { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 12px 16px; margin-bottom: 18px; text-align: left; font-size: 13px; color: var(--text2); }
 .srs-next-due-title { font-size: 10px; font-weight: 700; color: var(--text3); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 6px; }
+.srs-streak {
+  display: inline-block; font-size: 15px; font-weight: 700; color: #f97316;
+  background: rgba(249,115,22,.12); border: 1px solid rgba(249,115,22,.3);
+  border-radius: 20px; padding: 4px 16px; margin: 0 auto 14px;
+  box-shadow: 0 0 10px rgba(249,115,22,.25);
+}
+.srs-streak-day1 { color: var(--text2); background: var(--bg2); border-color: var(--border); box-shadow: none; }
+.srs-hard-cards {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  padding: 10px 14px; margin-bottom: 18px; text-align: left; font-size: 12px; color: var(--text3);
+}
+.srs-hard-cards summary { cursor: pointer; font-weight: 600; color: var(--orange, #f97316); font-size: 12px; }
+.srs-hard-cards ul { margin: 8px 0 2px 16px; padding: 0; line-height: 1.7; }
+.srs-hard-cards li { color: var(--text2); }
 @media (max-width: 500px) { .srs-stats, .rating-grid, .srs-rating-breakdown { grid-template-columns: repeat(2, 1fr); } }
 
 /* Notes panel (course-level) */
@@ -2059,6 +2091,27 @@ body {
 .confirm-box h3 { font-size: 17px; color: var(--text); margin-bottom: 10px; font-weight: 700; }
 .confirm-box p { font-size: 13px; color: var(--text3); margin-bottom: 24px; line-height: 1.6; }
 .confirm-btns { display: flex; gap: 10px; justify-content: center; }
+
+/* Diff modal */
+#diff-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.7); z-index: 300;
+  display: none; align-items: center; justify-content: center; backdrop-filter: blur(4px);
+}
+#diff-overlay.open { display: flex; }
+#diff-box {
+  background: var(--bg2); border: 1px solid var(--border2); border-radius: var(--radius-xl);
+  padding: 24px 28px; width: min(820px, 94vw); max-height: 85vh;
+  display: flex; flex-direction: column; box-shadow: var(--shadow-lg); animation: panelIn .2s ease;
+}
+.diff-view {
+  flex: 1; overflow-y: auto; font-size: 12px; font-family: "SF Mono", monospace;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg3);
+  min-height: 200px; max-height: 60vh;
+}
+.diff-line { padding: 2px 10px; white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
+.diff-line-add    { background: rgba(34,197,94,.15); color: #4ade80; }
+.diff-line-remove { background: rgba(239,68,68,.15); color: #f87171; }
+.diff-line-same   { color: var(--text2); }
 
 /* Spinner */
 .spin {
@@ -2558,9 +2611,15 @@ body {
                 </div>
                 <button class="tbtn btn-blue" id="sel-summarize-btn" style="width:100%;font-size:11px" onclick="generateSummary()">Summarize</button>
               </div>
-              <div id="bulk-read-row" style="display:flex;gap:6px;margin-bottom:4px">
-                <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markAllFilesRead(true)">✓ All read</button>
-                <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markAllFilesRead(false)">↺ All unread</button>
+              <div id="bulk-read-row" style="display:flex;flex-direction:column;gap:4px;margin-bottom:4px">
+                <div style="display:flex;gap:6px">
+                  <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markAllFilesRead(true)">✓ All read</button>
+                  <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="markAllFilesRead(false)">↺ All unread</button>
+                </div>
+                <div style="display:flex;gap:6px">
+                  <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="downloadCourseZip()">⬇ All files</button>
+                  <button class="tbtn btn-gray" style="flex:1;font-size:10px" onclick="downloadCourseZip(true)">⬇ Files + Notes</button>
+                </div>
               </div>
             </div>
           </div>
@@ -2717,6 +2776,30 @@ body {
       <button class="tbtn btn-gray" onclick="hideConfirm()">Cancel</button>
       <button class="tbtn btn-red" id="confirm-ok">Confirm</button>
     </div>
+  </div>
+</div>
+
+<!-- Diff modal -->
+<div id="diff-overlay" onclick="hideDiffModal()">
+  <div id="diff-box" onclick="event.stopPropagation()">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+      <h3 style="flex:1;margin:0;font-size:15px;font-weight:700;color:var(--text)">Compare Summaries</h3>
+      <button class="tbtn btn-gray" style="padding:3px 10px;font-size:11px" onclick="hideDiffModal()">✕ Close</button>
+    </div>
+    <div style="display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+      <div style="flex:1;min-width:140px">
+        <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:4px">Summary A</label>
+        <select id="diff-sel-a" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px;padding:5px 8px"></select>
+      </div>
+      <div style="flex:1;min-width:140px">
+        <label style="font-size:11px;color:var(--text3);display:block;margin-bottom:4px">Summary B</label>
+        <select id="diff-sel-b" style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:5px;color:var(--text);font-size:12px;padding:5px 8px"></select>
+      </div>
+      <div style="display:flex;align-items:flex-end">
+        <button class="tbtn btn-blue" style="font-size:12px" onclick="_runDiff()">Compare</button>
+      </div>
+    </div>
+    <div id="diff-view" class="diff-view"></div>
   </div>
 </div>
 
@@ -4120,6 +4203,10 @@ function markAllFilesRead(read) {
   filterAndRenderSidebar(); // update completion indicator
 }
 
+function downloadCourseZip(withNotes = false) {
+  window.location.href = `/api/download-zip/${enc(activeCourse)}${withNotes ? '?notes=1' : ''}`;
+}
+
 function toggleReadFile(filename) {
   const nowRead = !isFileRead(activeCourse, filename);
   setFileRead(activeCourse, filename, nowRead);
@@ -4642,6 +4729,7 @@ async function loadSummary(filename = null) {
       <div class="summary-content-wrap">
         <div class="summary-toolbar">
           <div style="flex:1;min-width:0;display:flex;gap:6px;flex-wrap:wrap">${pillsHtml}</div>
+          ${summaries.length >= 2 ? `<button class="tbtn btn-gray" onclick="_openDiffModal()" title="Compare summaries">⇄ Compare</button>` : ''}
           <button class="tbtn btn-gray" id="summary-edit-btn" onclick="_summaryToggleEdit()" title="Edit markdown">✎ Edit</button>
           <button class="tbtn btn-gray" onclick="copyToClipboard(summaryMD)" title="Copy markdown">📋 Copy</button>
           <a class="tbtn btn-gray" href="/api/summary-raw/${enc(activeCourse)}?file=${enc(_summaryActiveFile)}" download style="text-decoration:none">⬇ Download</a>
@@ -4701,6 +4789,60 @@ function _summaryDelete(filename) {
     toast('Deleted', 'ok');
     loadSummary();
   });
+}
+
+let _diffSummaries = [];
+function _openDiffModal() {
+  fetch(`/api/summaries/${enc(activeCourse)}`).then(r => r.json()).then(summaries => {
+    _diffSummaries = summaries || [];
+    const selA = document.getElementById('diff-sel-a');
+    const selB = document.getElementById('diff-sel-b');
+    selA.innerHTML = _diffSummaries.map((s,i) => `<option value="${esc(s.name)}" ${i===0?'selected':''}>${esc(summaryLabel(s.name))}</option>`).join('');
+    selB.innerHTML = _diffSummaries.map((s,i) => `<option value="${esc(s.name)}" ${i===1?'selected':''}>${esc(summaryLabel(s.name))}</option>`).join('');
+    document.getElementById('diff-view').innerHTML = '<div style="padding:20px;text-align:center;color:var(--text3)">Select summaries and click Compare.</div>';
+    document.getElementById('diff-overlay').classList.add('open');
+  });
+}
+function hideDiffModal() { document.getElementById('diff-overlay').classList.remove('open'); }
+
+function _computeDiff(a, b) {
+  const linesA = a.split('\\n');
+  const linesB = b.split('\\n');
+  const m = linesA.length, n = linesB.length;
+  // LCS table
+  const dp = Array.from({length: m+1}, () => new Array(n+1).fill(0));
+  for (let i = m-1; i >= 0; i--)
+    for (let j = n-1; j >= 0; j--)
+      dp[i][j] = linesA[i] === linesB[j] ? dp[i+1][j+1]+1 : Math.max(dp[i+1][j], dp[i][j+1]);
+  const result = [];
+  let i = 0, j = 0;
+  while (i < m || j < n) {
+    if (i < m && j < n && linesA[i] === linesB[j]) { result.push({type:'same', line: linesA[i]}); i++; j++; }
+    else if (j < n && (i >= m || dp[i][j+1] >= dp[i+1][j])) { result.push({type:'add', line: linesB[j]}); j++; }
+    else { result.push({type:'remove', line: linesA[i]}); i++; }
+  }
+  return result;
+}
+
+async function _runDiff() {
+  const nameA = document.getElementById('diff-sel-a').value;
+  const nameB = document.getElementById('diff-sel-b').value;
+  const view = document.getElementById('diff-view');
+  view.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text3)">Loading…</div>';
+  try {
+    const [resA, resB] = await Promise.all([
+      fetch(`/api/summary/${enc(activeCourse)}?file=${enc(nameA)}`).then(r => r.json()),
+      fetch(`/api/summary/${enc(activeCourse)}?file=${enc(nameB)}`).then(r => r.json()),
+    ]);
+    const diff = _computeDiff(resA.md || '', resB.md || '');
+    view.innerHTML = diff.map(d => {
+      const cls = d.type === 'add' ? 'diff-line-add' : d.type === 'remove' ? 'diff-line-remove' : 'diff-line-same';
+      const prefix = d.type === 'add' ? '+ ' : d.type === 'remove' ? '- ' : '  ';
+      return `<div class="diff-line ${cls}">${prefix}${esc(d.line)}</div>`;
+    }).join('') || '<div style="padding:20px;text-align:center;color:var(--text3)">No differences found.</div>';
+  } catch(e) {
+    view.innerHTML = `<div style="padding:20px;text-align:center;color:var(--red)">Error: ${esc(e.message)}</div>`;
+  }
 }
 
 function _updateSummarizeBtn() { /* no-op: always create new numbered summary */ }
@@ -4927,6 +5069,7 @@ function _srsStart(mode) {
   _srsSession = {
     queue, current: 0, revealed: false,
     ratings: {1:0,2:0,3:0,4:0},
+    hardCards: [],
     startTime: Date.now(),
     timerInterval: setInterval(() => {
       const el = document.getElementById('srs-timer');
@@ -5022,6 +5165,7 @@ function _srsRate(rating) {
   const card = _srsSession.queue[_srsSession.current];
   _srsData[card.id] = srsSchedule(_srsData[card.id], rating);
   _srsSession.ratings[rating]++;
+  if (rating === 1) _srsSession.hardCards.push(card.q);
   _srsSession.current++;
   _srsSession.revealed = false;
   const el = document.getElementById('srs-card-el');
@@ -5040,16 +5184,41 @@ function _srsSave() {
 function _srsDone() {
   clearInterval(_srsSession.timerInterval);
   const elapsed = formatTime(Date.now() - _srsSession.startTime);
-  const { ratings, queue } = _srsSession;
+  const { ratings, queue, hardCards } = _srsSession;
   const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
   const tStr = tomorrow.toISOString().split('T')[0];
   const dueTomorrow = _srsAllCards.filter(c => _srsData[c.id]?.due === tStr).length;
   const rColor = {1:'var(--red)',2:'var(--orange)',3:'var(--blue)',4:'var(--green)'};
   const rLabel = {1:'Again',2:'Hard',3:'Good',4:'Easy'};
+
+  // Streak logic
+  const streakKey = `srs_streak_${activeCourse}`;
+  const today = new Date().toISOString().split('T')[0];
+  const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+  let streakData = { date: null, count: 0 };
+  try { streakData = JSON.parse(localStorage.getItem(streakKey) || '{}'); } catch(e) {}
+  if (streakData.date === today) { /* keep */ }
+  else if (streakData.date === yesterday) streakData = { date: today, count: (streakData.count || 0) + 1 };
+  else streakData = { date: today, count: 1 };
+  localStorage.setItem(streakKey, JSON.stringify(streakData));
+  const streakCount = streakData.count || 1;
+  const streakHtml = streakCount > 1
+    ? `<div class="srs-streak">🔥 ${streakCount} day streak</div>`
+    : `<div class="srs-streak srs-streak-day1">Day 1</div>`;
+
+  // Hard cards
+  const uniqueHard = [...new Set(hardCards)];
+  const hardHtml = uniqueHard.length ? `
+    <details class="srs-hard-cards">
+      <summary>⚠ ${uniqueHard.length} card${uniqueHard.length>1?'s':''} to review</summary>
+      <ul>${uniqueHard.map(q => `<li>${esc(q.length > 80 ? q.slice(0,80)+'…' : q)}</li>`).join('')}</ul>
+    </details>` : '';
+
   document.getElementById('learn-body').innerHTML = `
     <div class="srs-summary">
       <div style="font-size:52px;margin-bottom:12px">🎉</div>
       <h2>Session complete!</h2>
+      ${streakHtml}
       <p class="srs-summary-sub">${queue.length} card${queue.length>1?'s':''} reviewed &middot; ⏱ ${elapsed}</p>
       <div class="srs-rating-breakdown">
         ${[1,2,3,4].map(r=>`
@@ -5058,6 +5227,7 @@ function _srsDone() {
             <div class="srb-label">${rLabel[r]}</div>
           </div>`).join('')}
       </div>
+      ${hardHtml}
       ${dueTomorrow > 0 ? `
       <div class="srs-next-due">
         <div class="srs-next-due-title">Up next</div>
@@ -5109,13 +5279,16 @@ function _renderManageCards(summaryCards) {
   const courseInfo = allCourses.find(c => c.path === activeCourse);
   const hasSummary = courseInfo?.has_summary || false;
   const customList = _mcCustomCards.map((c, i) => `
-    <div class="mc-card">
+    <div class="mc-card" id="mc-card-${i}">
       <div class="mc-card-body">
         ${_cardTypeBadge(c.type)}
         <div class="mc-card-q">${c.type === 'cloze' ? _clozeQ(c.q) : mdToHtml(c.q)}</div>
         <div class="mc-card-a">${mdToHtml(c.a)}</div>
       </div>
-      <button class="mc-card-del" onclick="_mcDelete(${i})" title="Delete">✕</button>
+      <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
+        <button class="mc-card-del" onclick="_mcEdit(${i})" title="Edit">✎</button>
+        <button class="mc-card-del" onclick="_mcDelete(${i})" title="Delete">✕</button>
+      </div>
     </div>`).join('');
 
   const totalCards = summaryCards.length + _mcCustomCards.length;
@@ -5192,6 +5365,31 @@ function _mcAdd() {
 
 function _mcDelete(i) {
   _mcCustomCards.splice(i, 1);
+  _mcSave();
+  showManageCards();
+}
+
+function _mcEdit(i) {
+  const card = _mcCustomCards[i];
+  const el = document.getElementById(`mc-card-${i}`);
+  if (!el) return;
+  el.innerHTML = `
+    <div class="mc-card-edit" style="flex:1">
+      <textarea id="mc-edit-q-${i}" rows="2" style="width:100%;resize:vertical;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:13px;padding:6px 8px;font-family:inherit;box-sizing:border-box;margin-bottom:6px">${esc(card.q)}</textarea>
+      <textarea id="mc-edit-a-${i}" rows="2" style="width:100%;resize:vertical;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-size:13px;padding:6px 8px;font-family:inherit;box-sizing:border-box;margin-bottom:8px">${esc(card.a)}</textarea>
+      <div style="display:flex;gap:8px">
+        <button class="tbtn btn-blue" style="font-size:11px;padding:4px 12px" onclick="_mcEditSave(${i})">Save</button>
+        <button class="tbtn btn-gray" style="font-size:11px;padding:4px 12px" onclick="showManageCards()">Cancel</button>
+      </div>
+    </div>`;
+}
+
+function _mcEditSave(i) {
+  const q = document.getElementById(`mc-edit-q-${i}`)?.value.trim();
+  const a = document.getElementById(`mc-edit-a-${i}`)?.value.trim();
+  if (!q || !a) return;
+  _mcCustomCards[i].q = q;
+  _mcCustomCards[i].a = a;
   _mcSave();
   showManageCards();
 }
