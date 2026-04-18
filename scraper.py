@@ -188,6 +188,21 @@ def _semester_started(sem_name: str) -> bool:
     return True  # unknown format → keep
 
 
+def _is_past_semester_folder(name: str) -> bool:
+    """Return True if the folder name is a semester label that has already ended.
+    Used to skip old-course-iteration subfolders (e.g. 'WiSe 2022/23') inside a course."""
+    today = date.today()
+    m = re.match(r'SoSe\s+(\d{4})', name, re.IGNORECASE)
+    if m:
+        # SoSe YYYY ends Sep 30 → past when Oct 1 of same year has passed
+        return date(int(m.group(1)), 10, 1) <= today
+    m = re.match(r'WiSe\s+(\d{4})', name, re.IGNORECASE)
+    if m:
+        # WiSe YYYY/YY ends Mar 31 → past when Apr 1 of year+1 has passed
+        return date(int(m.group(1)) + 1, 4, 1) <= today
+    return False
+
+
 async def get_all_semester_courses(page: Page) -> list[dict]:
     """
     Return courses grouped by semester by switching the semester filter for
@@ -394,6 +409,9 @@ async def _api_download_folder(
         sub_id   = sub.get("id") or sub.get("folder_id", "")
         sub_name = sanitize_dirname(sub.get("name", "")) or "folder"
         if not sub_id:
+            continue
+        if _is_past_semester_folder(sub_name):
+            log.info("%s⊘ Skipping past-semester folder: %s", indent, sub_name)
             continue
         sub_dir = dest_dir / sub_name
         sub_dir.mkdir(parents=True, exist_ok=True)
