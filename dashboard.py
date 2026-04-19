@@ -1683,7 +1683,7 @@ body {
 .pdf-page-wrapper .pdf-page-canvas { box-shadow: none; }
 .textLayer {
   position: absolute; left: 0; top: 0; right: 0; bottom: 0;
-  overflow: hidden; pointer-events: none; line-height: 1;
+  overflow: hidden; line-height: 1;
   user-select: text; pointer-events: auto;
 }
 .textLayer span, .textLayer br {
@@ -4215,7 +4215,11 @@ async function previewFile(filename) {
 
   const isPdf = ext === 'pdf';
   document.getElementById('pdf-find-topbar-btn').style.display = isPdf ? '' : 'none';
+  const fileListCollapsed = document.getElementById('files-list-col')?.classList.contains('collapsed');
   header.innerHTML = `
+    ${fileListCollapsed ? `<button id="filelist-show-btn" onclick="toggleFileList()" title="Show file list"
+      style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:13px;padding:2px 6px;border-radius:4px;margin-right:4px;transition:color var(--transition),background var(--transition)"
+      onmouseover="this.style.background='var(--bg4)'" onmouseout="this.style.background='none'">▶ List</button>` : ''}
     <span class="preview-header-name">${esc(filename.split('/').pop())}</span>
     ${isPdf ? `
       <span id="pdf-page-ind" style="font-size:11px;color:var(--text3);flex-shrink:0"></span>
