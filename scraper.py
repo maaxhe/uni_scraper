@@ -239,16 +239,23 @@ async def get_all_semester_courses(page: Page) -> list[dict]:
         log.info("Found %d course(s) total (no semester grouping)", len(courses))
         return [{"semester": "Alle Kurse", "courses": courses}]
 
-    # Drop semesters that haven't started yet (Stud.IP lists future ones too)
-    semester_options = [s for s in semester_options if _semester_started(s["name"])]
+    # Keep only the current semester: started but not yet ended
+    semester_options = [
+        s for s in semester_options
+        if _semester_started(s["name"]) and not _is_past_semester_folder(s["name"])
+    ]
 
-    log.info("Found %d semester(s) in filter: %s",
-             len(semester_options), [s["name"] for s in semester_options[:5]])
+    if not semester_options:
+        log.warning("Could not identify current semester — falling back to single-page scrape.")
+        seen: set[str] = set()
+        courses = await _scrape_courses_from_page(page, seen)
+        log.info("Found %d course(s) total (no semester grouping)", len(courses))
+        return [{"semester": "Alle Kurse", "courses": courses}]
+
+    log.info("Current semester(s): %s", [s["name"] for s in semester_options])
 
     # ── Step 2: for each semester, set filter → scrape ──────────────────────
-    # Only scrape recent semesters (skip far past beyond last 6)
-    MAX_SEMESTERS = 6
-    semesters_to_scrape = semester_options[:MAX_SEMESTERS]
+    semesters_to_scrape = semester_options
 
     results: list[dict] = []
     seen_urls: set[str] = set()
