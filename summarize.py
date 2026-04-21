@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 import anthropic
@@ -27,7 +28,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 COURSES_DIR = Path(os.environ.get("COURSES_DIR", "/Users/maxmacbookpro/Documents/Uni/Cognitive Science [Course]/Courses"))
-SUPPORTED_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt", ".md", ".pptx", ".ppt"}
+SUPPORTED_EXTENSIONS = {".pdf", ".doc", ".docx", ".txt", ".md", ".pptx"}
 MAX_CHARS = 40_000
 MODEL_ANTHROPIC = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-6")
 MODEL_OPENAI    = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
@@ -370,7 +371,7 @@ def process_course(
         p = PROMPTS.get(lang, PROMPTS["en"])
         header = p["header"].format(
             name=course_dir.name,
-            date=__import__("datetime").date.today(),
+            date=date.today(),
             n=len(file_contents),
             total=len(all_files),
         )

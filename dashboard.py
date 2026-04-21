@@ -8,12 +8,12 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import markdown2
 from dotenv import load_dotenv
-from flask import Flask, jsonify, render_template_string, request, send_file
+from flask import Flask, Response, jsonify, render_template_string, request, send_file
 
 load_dotenv()
 
@@ -29,7 +29,7 @@ FILE_NOTES_FILENAME  = "_file_notes.json"
 CUSTOM_INFO_FILENAME = "_custom_info.json"
 PROGRESS_FILE    = Path(__file__).parent / "progress.json"
 USER_STATE_FILE  = Path(__file__).parent / "user_state.json"
-SUPPORTED_EXT    = {".pdf", ".doc", ".docx", ".txt", ".md", ".pptx", ".ppt"}
+SUPPORTED_EXT    = {".pdf", ".doc", ".docx", ".txt", ".md", ".pptx"}
 
 app = Flask(__name__)
 
@@ -178,30 +178,10 @@ def read_file_text(course_name: str, filename: str) -> str:
     path = COURSES_DIR / course_name / filename
     if not path.exists():
         return ""
-    suffix = path.suffix.lower()
     try:
-        if suffix == ".pdf":
-            import fitz
-            doc = fitz.open(str(path))
-            return "\n\n".join(page.get_text() for page in doc)
-        elif suffix in {".doc", ".docx"}:
-            from docx import Document
-            doc = Document(str(path))
-            return "\n".join(p.text for p in doc.paragraphs)
-        elif suffix in {".txt", ".md"}:
-            return path.read_text(encoding="utf-8", errors="replace")
-        elif suffix == ".pptx":
-            from pptx import Presentation
-            prs = Presentation(str(path))
-            parts = []
-            for i, slide in enumerate(prs.slides, 1):
-                texts = [shape.text.strip() for shape in slide.shapes if hasattr(shape, "text") and shape.text.strip()]
-                if texts:
-                    parts.append(f"[Slide {i}]\n" + "\n".join(texts))
-            return "\n\n".join(parts)
+        return _extract_file_text(path) or ""
     except Exception as e:
         return f"Fehler beim Lesen: {e}"
-    return ""
 
 def get_qa_file(summary_path: Path) -> Path:
     """Derive the _qa.md path from a summary path."""
@@ -641,7 +621,6 @@ def api_file_note_download(course_name, filename):
     text = notes.get(filename, "")
     stem = Path(filename).stem
     md_name = f"{stem}_notizen.md"
-    from flask import Response
     return Response(text, mimetype="text/markdown",
                     headers={"Content-Disposition": f"attachment; filename=\"{md_name}\""})
 
@@ -658,7 +637,6 @@ def api_notes(course_name):
 def _update_streak(prog: dict) -> dict:
     """Update the global learning streak stored under _streak key."""
     today = datetime.now().date().isoformat()
-    from datetime import timedelta
     yesterday = (datetime.now().date() - timedelta(days=1)).isoformat()
     s = prog.get("_streak", {"count": 0, "last_date": None})
     if s["last_date"] == today:
@@ -853,7 +831,7 @@ def api_pipeline():
     return jsonify(get_pipeline_status())
 
 def _extract_file_text(path: Path) -> str:
-    """Extract plain text from a file for search purposes."""
+    """Extract plain text from a file."""
     suffix = path.suffix.lower()
     try:
         if suffix in {".txt", ".md"}:
@@ -861,11 +839,20 @@ def _extract_file_text(path: Path) -> str:
         elif suffix == ".pdf":
             import fitz
             doc = fitz.open(str(path))
-            return "\n".join(page.get_text() for page in doc)
+            return "\n\n".join(page.get_text() for page in doc)
         elif suffix in {".doc", ".docx"}:
             from docx import Document
             doc = Document(str(path))
             return "\n".join(p.text for p in doc.paragraphs)
+        elif suffix == ".pptx":
+            from pptx import Presentation
+            prs = Presentation(str(path))
+            parts = []
+            for i, slide in enumerate(prs.slides, 1):
+                texts = [shape.text.strip() for shape in slide.shapes if hasattr(shape, "text") and shape.text.strip()]
+                if texts:
+                    parts.append(f"[Slide {i}]\n" + "\n".join(texts))
+            return "\n\n".join(parts)
     except Exception:
         pass
     return ""
