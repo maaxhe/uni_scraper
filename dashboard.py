@@ -166,10 +166,9 @@ def list_files(course_dir: Path) -> list[str]:
     return sorted([
         str(f.relative_to(course_dir)) for f in course_dir.rglob("*")
         if f.is_file()
+        and f.suffix.lower() != ".json"
         and not SUMMARY_RE.match(f.name)
         and f.name != NOTES_FILENAME
-        and f.name != FILE_NOTES_FILENAME
-        and f.name != CUSTOM_INFO_FILENAME
         and f.name != "_last_sync"
         and ".summary" not in f.name
     ])
