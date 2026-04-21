@@ -1570,9 +1570,13 @@ body {
 .files-layout { display: flex; height: 100%; overflow: hidden; gap: 0; }
 .files-list-col { width: 260px; min-width: 140px; max-width: 500px; flex-shrink: 0; overflow-y: auto; padding: 0 2px 0 0; transition: width 180ms ease, min-width 180ms ease; }
 .files-list-col.collapsed { width: 0 !important; min-width: 0 !important; overflow: hidden; }
-.files-list-col.collapsed + .resize-divider { display: none; }
-#filelist-toggle-btn { background: none; border: none; cursor: pointer; color: var(--text3); font-size: 13px; padding: 2px 4px; border-radius: 4px; transition: color var(--transition), background var(--transition); line-height: 1; }
-#filelist-toggle-btn:hover { color: var(--text2); background: var(--bg3); }
+.files-list-col.collapsed ~ #divider-files { display: none; }
+#filelist-toggle-tab {
+  width: 18px; flex-shrink: 0; display: flex; align-items: flex-start; justify-content: center;
+  padding-top: 6px; background: none; border: none; cursor: pointer;
+  color: var(--text3); font-size: 11px; transition: color var(--transition);
+}
+#filelist-toggle-tab:hover { color: var(--text2); }
 .files-preview-col { flex: 1; min-width: 0; overflow: hidden; }
 
 .file-item {
@@ -2638,7 +2642,6 @@ body {
           <div class="files-list-col" id="files-list-col">
             <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
               <span style="font-size:12px;font-weight:600;color:var(--text3);flex:1">FILES</span>
-              <button id="filelist-toggle-btn" onclick="toggleFileList()" title="Toggle file list">◀</button>
               <select id="file-sort-select" class="sort-select" style="font-size:10px;padding:2px 4px;max-width:90px" onchange="setFileSort(this.value)">
                 <option value="name">Name</option>
                 <option value="date">Datum</option>
@@ -2684,6 +2687,8 @@ body {
               </div>
             </div>
           </div>
+          <!-- Always-visible file list toggle tab -->
+          <button id="filelist-toggle-tab" onclick="toggleFileList()" title="Toggle file list">◀</button>
           <!-- Files / Preview resize divider -->
           <div class="resize-divider" id="divider-files" title="Ziehen zum Anpassen"></div>
           <!-- preview-area wraps both preview and notes so fake-fullscreen includes both -->
@@ -2691,9 +2696,6 @@ body {
             <div class="files-preview-col" id="files-preview-col">
               <div class="preview-box">
                 <div class="preview-header" id="preview-header">
-                  <button id="filelist-show-btn" onclick="toggleFileList()" title="Show file list"
-                    style="display:none;background:none;border:none;cursor:pointer;color:var(--text3);font-size:13px;padding:2px 6px;border-radius:4px;margin-right:4px;transition:color var(--transition),background var(--transition)"
-                    onmouseover="this.style.background='var(--bg4)'" onmouseout="this.style.background='none'">▶ List</button>
                   <span class="preview-header-name">Select a file to preview</span>
                 </div>
                 <div id="pdf-find-bar">
@@ -4201,11 +4203,7 @@ async function previewFile(filename) {
 
   const isPdf = ext === 'pdf';
   document.getElementById('pdf-find-topbar-btn').style.display = isPdf ? '' : 'none';
-  const fileListCollapsed = document.getElementById('files-list-col')?.classList.contains('collapsed');
   header.innerHTML = `
-    ${fileListCollapsed ? `<button id="filelist-show-btn" onclick="toggleFileList()" title="Show file list"
-      style="background:none;border:none;cursor:pointer;color:var(--text3);font-size:13px;padding:2px 6px;border-radius:4px;margin-right:4px;transition:color var(--transition),background var(--transition)"
-      onmouseover="this.style.background='var(--bg4)'" onmouseout="this.style.background='none'">▶ List</button>` : ''}
     <span class="preview-header-name">${esc(filename.split('/').pop())}</span>
     ${isPdf ? `
       <span id="pdf-page-ind" style="font-size:11px;color:var(--text3);flex-shrink:0"></span>
@@ -5666,12 +5664,10 @@ let _fileNotesFile   = null;   // currently loaded filename
 let _fileNotesSaveTimer = null;
 
 function toggleFileList() {
-  const col     = document.getElementById('files-list-col');
-  const showBtn = document.getElementById('filelist-show-btn');
-  const hideBtn = document.getElementById('filelist-toggle-btn');
+  const col = document.getElementById('files-list-col');
+  const tab = document.getElementById('filelist-toggle-tab');
   const collapsed = col.classList.toggle('collapsed');
-  if (showBtn) showBtn.style.display = collapsed ? 'inline-block' : 'none';
-  if (hideBtn) hideBtn.textContent = collapsed ? '▶' : '◀';
+  if (tab) tab.textContent = collapsed ? '▶' : '◀';
 }
 
 function toggleFileNotes() {
