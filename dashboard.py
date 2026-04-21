@@ -837,8 +837,8 @@ def _extract_file_text(path: Path) -> str:
             return path.read_text(encoding="utf-8", errors="replace")
         elif suffix == ".pdf":
             import fitz
-            doc = fitz.open(str(path))
-            return "\n\n".join(page.get_text() for page in doc)
+            with fitz.open(str(path)) as doc:
+                return "\n\n".join(page.get_text() for page in doc)
         elif suffix in {".doc", ".docx"}:
             from docx import Document
             doc = Document(str(path))
@@ -6865,4 +6865,4 @@ def index():
 
 if __name__ == "__main__":
     print("Dashboard → http://localhost:5001")
-    app.run(debug=True, port=5001)
+    app.run(debug=False, port=5001)

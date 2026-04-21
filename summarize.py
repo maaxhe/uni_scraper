@@ -50,8 +50,8 @@ def extract_text(path: Path) -> str:
     suffix = path.suffix.lower()
     try:
         if suffix == ".pdf":
-            doc = fitz.open(str(path))
-            return "\n".join(page.get_text() for page in doc)
+            with fitz.open(str(path)) as doc:
+                return "\n".join(page.get_text() for page in doc)
         elif suffix in {".doc", ".docx"}:
             doc = Document(str(path))
             return "\n".join(p.text for p in doc.paragraphs)

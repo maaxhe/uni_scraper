@@ -809,7 +809,17 @@ async def main() -> None:
     log.info("Output directory: %s", output_root)
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=args.headless)
+        browser = await pw.chromium.launch(
+            headless=args.headless,
+            args=[
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-extensions",
+                "--disable-background-networking",
+                "--no-first-run",
+                "--renderer-process-limit=1",
+            ],
+        )
         context = await browser.new_context(accept_downloads=True)
         page = await context.new_page()
 
