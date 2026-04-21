@@ -758,13 +758,47 @@ def api_summarize_all():
 
     return jsonify({"success": errors == 0, "done": len(pending) - errors, "count": len(pending), "log": "\n".join(log_lines) or "Nichts zu tun."})
 
+# ---------------------------------------------------------------------------
+# Non-blocking scrape / sync — subprocess writes directly to PIPELINE_LOG,
+# dashboard holds zero output in RAM. JS polls /api/sync-status.
+# ---------------------------------------------------------------------------
+_active_proc: "subprocess.Popen | None" = None
+_active_log_fh = None  # file handle for PIPELINE_LOG, kept open while proc runs
+
+def _start_proc(cmd: list) -> dict:
+    global _active_proc, _active_log_fh
+    if _active_proc and _active_proc.poll() is None:
+        return {"started": False, "error": "Already running"}
+    if _active_log_fh:
+        try: _active_log_fh.close()
+        except Exception: pass
+    _active_log_fh = open(PIPELINE_LOG, "w", encoding="utf-8", buffering=1)
+    _active_proc = subprocess.Popen(cmd, stdout=_active_log_fh, stderr=subprocess.STDOUT)
+    return {"started": True}
+
+@app.route("/api/sync-status")
+def api_sync_status():
+    global _active_proc, _active_log_fh
+    running = _active_proc is not None and _active_proc.poll() is None
+    success = None
+    if _active_proc and not running:
+        success = _active_proc.returncode == 0
+        if _active_log_fh:
+            try: _active_log_fh.close()
+            except Exception: pass
+            _active_log_fh = None
+    log = ""
+    try:
+        log_path = Path(PIPELINE_LOG)
+        if log_path.exists():
+            log = log_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+    return jsonify({"running": running, "success": success, "log": log})
+
 @app.route("/api/scrape", methods=["POST"])
 def api_scrape():
-    try:
-        result = subprocess.run([PYTHON, SCRAPER_SCRIPT], capture_output=True, text=True, timeout=600)
-        return jsonify({"success": result.returncode == 0, "log": result.stdout + result.stderr})
-    except Exception as e:
-        return jsonify({"success": False, "log": str(e)})
+    return jsonify(_start_proc([PYTHON, SCRAPER_SCRIPT]))
 
 COURSES_JSON = Path(__file__).parent / "courses.json"
 
@@ -773,20 +807,13 @@ def api_sync_course():
     """Re-sync a single course by its local relative path using courses.json."""
     course_path = (request.json or {}).get("course", "")
     if not course_path:
-        return jsonify({"success": False, "log": "No course path provided."})
+        return jsonify({"started": False, "error": "No course path provided."})
     if not COURSES_JSON.exists():
-        return jsonify({"success": False, "log": "courses.json not found. Run a full scrape first."})
+        return jsonify({"started": False, "error": "courses.json not found. Run a full scrape first."})
     registry = json.loads(COURSES_JSON.read_text(encoding="utf-8"))
     if course_path not in registry:
-        return jsonify({"success": False, "log": f"Course '{course_path}' not in registry. Run a full scrape first."})
-    try:
-        result = subprocess.run(
-            [PYTHON, SCRAPER_SCRIPT, "--course", course_path],
-            capture_output=True, text=True, timeout=600,
-        )
-        return jsonify({"success": result.returncode == 0, "log": result.stdout + result.stderr})
-    except Exception as e:
-        return jsonify({"success": False, "log": str(e)})
+        return jsonify({"started": False, "error": f"Course '{course_path}' not in registry. Run a full scrape first."})
+    return jsonify(_start_proc([PYTHON, SCRAPER_SCRIPT, "--course", course_path]))
 
 @app.route("/api/course-registry")
 def api_course_registry():
@@ -6340,23 +6367,52 @@ async function doFileSearch(q) {
 // ═══════════════════════════════════════════════════════════════════════════
 // Scraper
 // ═══════════════════════════════════════════════════════════════════════════
+let _syncPolling = false;
+
+async function _pollSyncStatus(onDone) {
+  if (_syncPolling) return;
+  _syncPolling = true;
+  let lastLen = 0;
+  while (_syncPolling) {
+    await new Promise(r => setTimeout(r, 1000));
+    let data;
+    try { data = await (await fetch('/api/sync-status')).json(); }
+    catch { break; }
+    if (data.log && data.log.length > lastLen) {
+      logAppend(data.log.slice(lastLen));
+      lastLen = data.log.length;
+    }
+    if (!data.running) {
+      _syncPolling = false;
+      onDone(data);
+      return;
+    }
+  }
+  _syncPolling = false;
+}
+
 async function runScraper() {
   setLoading(true);
   logShow('Syncing new files from Stud.IP…\n');
-  const res  = await fetch('/api/scrape', { method: 'POST' });
-  const data = await res.json();
-  logAppend(data.log || '');
-  setLoading(false);
-  if (data.success) {
-    logAppend('\n✅ Done!');
-    courseTree = await _fetchCourses();
-    allCourses = flattenTree(courseTree);
-    filterAndRenderSidebar();
-    if (activeCourse) loadFiles();
-    toast('Files updated!', 'ok');
-  } else {
-    toast('Scraping error.', 'err');
+  const data = await (await fetch('/api/scrape', { method: 'POST' })).json();
+  if (!data.started) {
+    logAppend(data.error || 'Could not start.');
+    setLoading(false);
+    return;
   }
+  _pollSyncStatus(async result => {
+    setLoading(false);
+    if (result.success) {
+      logAppend('\n✅ Done!');
+      courseTree = await _fetchCourses();
+      allCourses = flattenTree(courseTree);
+      filterAndRenderSidebar();
+      if (activeCourse) loadFiles();
+      toast('Files updated!', 'ok');
+    } else {
+      toast('Scraping error.', 'err');
+    }
+  });
 }
 
 async function syncCourse() {
@@ -6365,25 +6421,32 @@ async function syncCourse() {
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Sync…'; }
   setLoading(true);
   logShow(`Sync: ${activeCourse}…\n`);
-  const res  = await fetch('/api/sync-course', {
+  const data = await (await fetch('/api/sync-course', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({course: activeCourse}),
-  });
-  const data = await res.json();
-  logAppend(data.log || '');
-  setLoading(false);
-  if (btn) { btn.disabled = false; btn.textContent = '↓ Sync'; }
-  if (data.success) {
-    logAppend('\n✅ Done!');
-    courseTree = await _fetchCourses();
-    allCourses = flattenTree(courseTree);
-    filterAndRenderSidebar();
-    loadFiles();
-    toast('Course updated!', 'ok');
-  } else {
-    toast(data.log?.includes('not in registry') ? 'Run a full sync first.' : 'Sync failed.', 'err');
+  })).json();
+  if (!data.started) {
+    logAppend(data.error || 'Could not start.');
+    setLoading(false);
+    if (btn) { btn.disabled = false; btn.textContent = '↓ Sync'; }
+    toast(data.error?.includes('not in registry') ? 'Run a full sync first.' : 'Sync failed.', 'err');
+    return;
   }
+  _pollSyncStatus(async result => {
+    setLoading(false);
+    if (btn) { btn.disabled = false; btn.textContent = '↓ Sync'; }
+    if (result.success) {
+      logAppend('\n✅ Done!');
+      courseTree = await _fetchCourses();
+      allCourses = flattenTree(courseTree);
+      filterAndRenderSidebar();
+      loadFiles();
+      toast('Course updated!', 'ok');
+    } else {
+      toast('Sync failed.', 'err');
+    }
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
