@@ -852,6 +852,63 @@ def api_save_custom_info(course_name):
     (d / CUSTOM_INFO_FILENAME).write_text(json.dumps(fields, ensure_ascii=False, indent=2), encoding="utf-8")
     return jsonify({"success": True})
 
+# ---------------------------------------------------------------------------
+# Background service (macOS LaunchAgent)
+# ---------------------------------------------------------------------------
+_PLIST_LABEL = "com.uniscraper.dashboard"
+_PLIST_PATH  = Path.home() / "Library" / "LaunchAgents" / f"{_PLIST_LABEL}.plist"
+_DASHBOARD_SCRIPT = str(Path(__file__).resolve())
+_DASHBOARD_DIR    = str(Path(__file__).parent.resolve())
+_DASHBOARD_LOG    = str(Path(__file__).parent / "dashboard.log")
+
+def _plist_content() -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>{_PLIST_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{PYTHON}</string>
+        <string>{_DASHBOARD_SCRIPT}</string>
+    </array>
+    <key>RunAtLoad</key><true/>
+    <key>KeepAlive</key><false/>
+    <key>WorkingDirectory</key><string>{_DASHBOARD_DIR}</string>
+    <key>StandardOutPath</key><string>{_DASHBOARD_LOG}</string>
+    <key>StandardErrorPath</key><string>{_DASHBOARD_LOG}</string>
+</dict>
+</plist>"""
+
+@app.route("/api/background-status")
+def api_background_status():
+    enabled = _PLIST_PATH.exists()
+    return jsonify({
+        "enabled": enabled,
+        "plist_path": str(_PLIST_PATH),
+        "start_cmd": f"cd '{_DASHBOARD_DIR}' && {PYTHON} dashboard.py",
+    })
+
+@app.route("/api/background-enable", methods=["POST"])
+def api_background_enable():
+    try:
+        _PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _PLIST_PATH.write_text(_plist_content(), encoding="utf-8")
+        subprocess.run(["launchctl", "load", str(_PLIST_PATH)], check=False)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+@app.route("/api/background-disable", methods=["POST"])
+def api_background_disable():
+    try:
+        if _PLIST_PATH.exists():
+            subprocess.run(["launchctl", "unload", str(_PLIST_PATH)], check=False)
+            _PLIST_PATH.unlink()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
 @app.route("/api/pipeline-status")
 def api_pipeline():
     return jsonify(get_pipeline_status())
@@ -1428,6 +1485,36 @@ body {
   padding: 12px 18px; display: flex; align-items: center; gap: 12px; margin-bottom: 20px;
 }
 .pipeline-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+
+/* Background service card */
+.bg-service-card {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-lg);
+  padding: 16px 18px; margin-top: 24px;
+}
+.bg-service-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.bg-service-title { font-size: 12px; font-weight: 600; color: var(--text2); flex: 1; }
+.bg-toggle { position: relative; width: 36px; height: 20px; flex-shrink: 0; }
+.bg-toggle input { opacity: 0; width: 0; height: 0; }
+.bg-toggle-slider {
+  position: absolute; inset: 0; background: var(--bg4); border-radius: 20px;
+  cursor: pointer; transition: background .2s;
+}
+.bg-toggle input:checked + .bg-toggle-slider { background: var(--blue); }
+.bg-toggle-slider::before {
+  content: ''; position: absolute; width: 14px; height: 14px; border-radius: 50%;
+  background: #fff; left: 3px; top: 3px; transition: transform .2s;
+}
+.bg-toggle input:checked + .bg-toggle-slider::before { transform: translateX(16px); }
+.bg-instructions {
+  font-size: 11px; color: var(--text3); line-height: 1.7;
+  border-top: 1px solid var(--border); padding-top: 10px; margin-top: 4px;
+}
+.bg-instructions code {
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 4px;
+  padding: 2px 7px; font-size: 11px; color: var(--text2); font-family: "SF Mono", monospace;
+  cursor: pointer; user-select: all;
+}
+.bg-status-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; display: inline-block; margin-right: 4px; }
 
 /* Sticky notes pinboard */
 .pinboard {
@@ -2638,6 +2725,18 @@ body {
           <div class="todo-list" id="todo-list"></div>
           <button class="todo-add-btn" onclick="todoAddItem()">+ Add task</button>
         </div>
+
+        <!-- Background service card -->
+        <div class="bg-service-card" id="bg-service-card">
+          <div class="bg-service-header">
+            <span class="bg-service-title">🖥 Run dashboard in background (auto-start at login)</span>
+            <label class="bg-toggle" title="Toggle auto-start">
+              <input type="checkbox" id="bg-toggle-input" onchange="bgToggle(this.checked)">
+              <span class="bg-toggle-slider"></span>
+            </label>
+          </div>
+          <div class="bg-instructions" id="bg-instructions">Loading…</div>
+        </div>
       </div>
 
       <!-- Courses overview -->
@@ -3146,6 +3245,7 @@ async function boot() {
   pinRender();
   if (_todoLoad().length === 0) _todoSave([{ text: '', done: false }]);
   todoRender();
+  loadBgServiceCard();
 
   // Restore last session state
   const lastCourse = localStorage.getItem('last_course');
@@ -3798,6 +3898,50 @@ function goHome() {
   document.getElementById('course-title-bar').style.display = 'none';
   showPanel('home');
   filterAndRenderSidebar();
+  loadBgServiceCard();
+}
+
+async function loadBgServiceCard() {
+  const instr = document.getElementById('bg-instructions');
+  const toggle = document.getElementById('bg-toggle-input');
+  if (!instr || !toggle) return;
+  let data;
+  try { data = await (await fetch('/api/background-status')).json(); }
+  catch { instr.textContent = 'Could not load status.'; return; }
+
+  toggle.checked = data.enabled;
+  const statusDot = `<span class="bg-status-dot" style="background:${data.enabled ? 'var(--green)' : 'var(--text3)'}"></span>`;
+  const statusText = data.enabled
+    ? `${statusDot}<strong>Auto-start enabled</strong> — dashboard starts automatically at login.`
+    : `${statusDot}<strong>Auto-start disabled</strong> — dashboard only runs while this terminal session is active.`;
+
+  instr.innerHTML = `
+    <div style="margin-bottom:8px">${statusText}</div>
+    <div style="margin-bottom:6px"><strong>To start manually:</strong><br>
+      Open Terminal and run:<br>
+      <code onclick="navigator.clipboard.writeText(this.textContent)" title="Click to copy">${data.start_cmd}</code>
+    </div>
+    <div style="margin-bottom:6px"><strong>Then open:</strong>
+      <code onclick="navigator.clipboard.writeText('http://localhost:5001')" title="Click to copy">http://localhost:5001</code>
+    </div>
+    <div style="color:var(--text3);font-size:10px;margin-top:4px">
+      ${data.enabled
+        ? 'To stop the background service, disable the toggle above. The currently running instance will keep going until you quit it in Activity Monitor or restart your Mac.'
+        : 'Enable the toggle to auto-start the dashboard at every login — no terminal needed.'}
+    </div>`;
+}
+
+async function bgToggle(enabled) {
+  const instr = document.getElementById('bg-instructions');
+  instr.innerHTML = '<span style="color:var(--text3)">Updating…</span>';
+  try {
+    const res = await fetch(enabled ? '/api/background-enable' : '/api/background-disable', { method: 'POST' });
+    const data = await res.json();
+    if (!data.ok) instr.innerHTML = `<span style="color:var(--red)">Error: ${data.error}</span>`;
+    else loadBgServiceCard();
+  } catch(e) {
+    instr.innerHTML = `<span style="color:var(--red)">Error: ${e}</span>`;
+  }
 }
 
 function goCoursesOverview() {
