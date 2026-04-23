@@ -3917,6 +3917,7 @@ function buildRecommendations(courses) {
 }
 
 function goHome() {
+  _flushPendingSaves();
   activeCourse = null;
   document.getElementById('tabs').style.display = 'none';
   document.getElementById('course-title-bar').style.display = 'none';
@@ -4048,6 +4049,7 @@ function renderCoursesOverview() {
 // Course selection
 // ═══════════════════════════════════════════════════════════════════════════
 async function selectCourse(path) {
+  await _flushPendingSaves();
   activeCourse = path;
   localStorage.setItem('last_course', path);
   _expandedFolders.clear();
@@ -5840,6 +5842,8 @@ async function loadNotes() {
 }
 
 async function saveNotes() {
+  if (!activeCourse) return;
+  notesSaveTimer = null;
   const text = document.getElementById('notes-editor').value;
   await fetch(`/api/notes/${enc(activeCourse)}`, {
     method: 'POST',
@@ -5847,12 +5851,37 @@ async function saveNotes() {
     body: JSON.stringify({ text })
   });
   const el = document.getElementById('notes-saved');
-  el.textContent = '✓ Gespeichert';
+  el.textContent = '✓ Saved';
   el.style.color = 'var(--green)';
   el.style.display = 'inline';
   setTimeout(() => { el.style.display = 'none'; }, 2000);
   allCourses = allCourses.map(c => c.path === activeCourse ? {...c, has_notes: true} : c);
 }
+
+// Flush any pending saves immediately — call before navigating away
+async function _flushPendingSaves() {
+  if (notesSaveTimer) { clearTimeout(notesSaveTimer); await saveNotes(); }
+  if (_fileNotesSaveTimer) { clearTimeout(_fileNotesSaveTimer); await _saveFileNote(); }
+}
+
+// Save on tab/window close via sendBeacon (synchronous-friendly)
+window.addEventListener('beforeunload', () => {
+  if (notesSaveTimer && activeCourse) {
+    const text = document.getElementById('notes-editor')?.value ?? '';
+    navigator.sendBeacon(`/api/notes/${enc(activeCourse)}`,
+      new Blob([JSON.stringify({text})], {type:'application/json'}));
+  }
+  if (_fileNotesSaveTimer && activeCourse && _fileNotesFile) {
+    const text = document.getElementById('fnotes-editor')?.value ?? '';
+    navigator.sendBeacon(`/api/file-note/${enc(activeCourse)}/${enc(_fileNotesFile)}`,
+      new Blob([JSON.stringify({text})], {type:'application/json'}));
+  }
+});
+
+// Save when tab loses visibility (switching apps, minimising, etc.)
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) _flushPendingSaves();
+});
 
 // ═══════════════════════════════════════════════════════════════════════════
 // File-level notes (sliding right panel)
@@ -6588,7 +6617,7 @@ document.addEventListener('keydown', e => {
     ed.selectionStart = ed.selectionEnd = start + 2;
   }
   clearTimeout(notesSaveTimer);
-  notesSaveTimer = setTimeout(saveNotes, 3000);
+  notesSaveTimer = setTimeout(saveNotes, 1000);
 });
 
 // Auto-save notes + unsaved indicator
@@ -6599,7 +6628,7 @@ document.addEventListener('input', e => {
     el.style.color = 'var(--orange)';
     el.style.display = 'inline';
     clearTimeout(notesSaveTimer);
-    notesSaveTimer = setTimeout(saveNotes, 3000);
+    notesSaveTimer = setTimeout(saveNotes, 1000);
   }
 });
 
