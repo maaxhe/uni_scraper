@@ -909,6 +909,16 @@ def api_background_disable():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
+@app.route("/api/shutdown", methods=["POST"])
+def api_shutdown():
+    def _kill():
+        import time
+        time.sleep(0.3)
+        os.kill(os.getpid(), 9)
+    import threading
+    threading.Thread(target=_kill, daemon=True).start()
+    return jsonify({"ok": True})
+
 @app.route("/api/pipeline-status")
 def api_pipeline():
     return jsonify(get_pipeline_status())
@@ -2625,7 +2635,6 @@ body {
     style="display:none;font-size:12px;padding:6px 10px" title="Search in PDF (Ctrl+F)">🔍 in PDF</button>
   <button class="tbtn btn-gray" id="courses-overview-btn" onclick="goCoursesOverview()" title="Course overview">All courses</button>
   <button class="tbtn btn-gray topbar-shortcuts" onclick="showShortcuts()" title="Keyboard shortcuts (?)">⌨️</button>
-  <button class="tbtn btn-gray" id="theme-toggle-btn" onclick="toggleTheme()" title="Toggle light/dark">🌙</button>
   <button class="tbtn btn-gray" id="settings-btn" onclick="toggleSettingsPopover()" title="Settings">⚙</button>
   <button class="tbtn btn-blue" id="scrape-btn" onclick="runScraper()">↓<span class="tbtn-label"> Sync</span></button>
 </div>
@@ -2635,6 +2644,17 @@ body {
   background:var(--bg2);border:1px solid var(--border2);border-radius:10px;
   padding:16px 18px;width:300px;box-shadow:0 8px 32px rgba(0,0,0,.35)">
   <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:14px">⚙ Settings</div>
+
+  <!-- Light / dark toggle -->
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+    <span style="font-size:12px;color:var(--text2);flex:1">Light mode</span>
+    <label class="bg-toggle">
+      <input type="checkbox" id="theme-toggle-input" onchange="toggleTheme()">
+      <span class="bg-toggle-slider"></span>
+    </label>
+  </div>
+
+  <div style="border-top:1px solid var(--border);padding-top:12px;margin-bottom:10px"></div>
 
   <!-- Background toggle -->
   <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
@@ -2650,6 +2670,11 @@ body {
   <div style="border-top:1px solid var(--border);padding-top:12px">
     <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:6px">HOW TO RESTART</div>
     <div id="bg-instructions" style="font-size:11px;color:var(--text3);line-height:1.7">Loading…</div>
+  </div>
+
+  <!-- Shutdown -->
+  <div style="border-top:1px solid var(--border);padding-top:12px;margin-top:12px">
+    <button class="tbtn btn-red" style="width:100%;font-size:11px" onclick="shutdownApp()">⏻ Shut down</button>
   </div>
 </div>
 
@@ -2993,6 +3018,22 @@ body {
   </div>
 </div>
 
+<!-- Shutdown confirm modal -->
+<div id="shutdown-overlay" onclick="hideShutdownModal()" style="display:none;position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.55);align-items:center;justify-content:center">
+  <div onclick="event.stopPropagation()" style="background:var(--bg2);border:1px solid var(--border2);border-radius:12px;padding:24px 26px;width:320px;box-shadow:0 12px 40px rgba(0,0,0,.4)">
+    <h3 style="margin:0 0 8px;font-size:15px;color:var(--text1)">Shut down?</h3>
+    <p style="margin:0 0 16px;font-size:12px;color:var(--text3);line-height:1.5">The server will stop and the app will no longer be reachable.</p>
+    <div style="background:var(--bg3);border-radius:8px;padding:12px 14px;margin-bottom:18px">
+      <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:6px">HOW TO RESTART</div>
+      <div id="shutdown-restart-instructions" style="font-size:11px;color:var(--text3);line-height:1.8">Loading…</div>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="tbtn btn-gray" style="flex:1" onclick="hideShutdownModal()">Cancel</button>
+      <button class="tbtn btn-red" style="flex:1" onclick="doShutdown()">⏻ Shut down</button>
+    </div>
+  </div>
+</div>
+
 <!-- Diff modal -->
 <div id="diff-overlay" onclick="hideDiffModal()">
   <div id="diff-box" onclick="event.stopPropagation()">
@@ -3056,16 +3097,17 @@ function applyFontSize() {} // placeholder — font size is fixed for now
 // ── Theme ────────────────────────────────────────────────────────────────
 function applyTheme(light) {
   document.documentElement.classList.toggle('light', light);
-  const btn = document.getElementById('theme-toggle-btn');
-  if (btn) btn.textContent = light ? '🌑' : '🌙';
+  const cb = document.getElementById('theme-toggle-input');
+  if (cb) cb.checked = light;
 }
 function toggleTheme() {
   const isLight = document.documentElement.classList.contains('light');
   localStorage.setItem('theme', isLight ? 'dark' : 'light');
   applyTheme(!isLight);
 }
-// Apply saved theme immediately (before boot) to avoid flash
+// Apply saved theme immediately (before boot) to avoid flash; re-sync checkbox once DOM is ready
 applyTheme(localStorage.getItem('theme') === 'light');
+document.addEventListener('DOMContentLoaded', () => applyTheme(localStorage.getItem('theme') === 'light'));
 
 // ═══════════════════════════════════════════════════════════════════════════
 // User state — persisted server-side so it survives browser/device changes
@@ -3937,6 +3979,25 @@ document.addEventListener('click', e => {
       !pop.contains(e.target) && !document.getElementById('settings-btn').contains(e.target))
     pop.style.display = 'none';
 });
+
+async function shutdownApp() {
+  document.getElementById('settings-popover').style.display = 'none';
+  const overlay = document.getElementById('shutdown-overlay');
+  const instr   = document.getElementById('shutdown-restart-instructions');
+  overlay.style.display = 'flex';
+  try {
+    const data = await (await fetch('/api/background-status')).json();
+    instr.innerHTML = `1. Open Terminal<br>2. Run: <code onclick="navigator.clipboard.writeText(this.textContent);this.style.outline='1px solid var(--blue)';setTimeout(()=>this.style.outline='',800)" title="Click to copy">${data.start_cmd}</code><br>3. Open: <code onclick="navigator.clipboard.writeText('http://localhost:5001');this.style.outline='1px solid var(--blue)';setTimeout(()=>this.style.outline='',800)" title="Click to copy">http://localhost:5001</code>`;
+  } catch { instr.textContent = 'Run: python dashboard.py'; }
+}
+function hideShutdownModal() {
+  document.getElementById('shutdown-overlay').style.display = 'none';
+}
+async function doShutdown() {
+  hideShutdownModal();
+  try { await fetch('/api/shutdown', { method: 'POST' }); } catch {}
+  document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;color:#888;font-size:14px">Server shut down. You can close this tab.</div>';
+}
 
 async function loadBgServiceCard() {
   const instr  = document.getElementById('bg-instructions');
