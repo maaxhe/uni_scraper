@@ -2965,6 +2965,16 @@ body {
     <div class="shortcut-row"><kbd>4</kbd>          <span class="shortcut-desc">Notes tab</span></div>
     <div class="shortcut-row"><kbd>N</kbd>          <span class="shortcut-desc">Toggle file notes</span></div>
     <div class="shortcut-row"><kbd>5</kbd>          <span class="shortcut-desc">Chat tab</span></div>
+    <div class="shortcuts-section">Notes editor</div>
+    <div class="shortcut-row"><kbd>Ctrl+B</kbd>     <span class="shortcut-desc">Bold</span></div>
+    <div class="shortcut-row"><kbd>Ctrl+I</kbd>     <span class="shortcut-desc">Italic</span></div>
+    <div class="shortcut-row"><kbd>Ctrl+K</kbd>     <span class="shortcut-desc">Insert link</span></div>
+    <div class="shortcut-row"><kbd>Ctrl+`</kbd>     <span class="shortcut-desc">Inline code</span></div>
+    <div class="shortcut-row"><kbd>Ctrl+Shift+K</kbd> <span class="shortcut-desc">Code block</span></div>
+    <div class="shortcut-row"><kbd>Ctrl+Shift+X</kbd> <span class="shortcut-desc">Strikethrough</span></div>
+    <div class="shortcut-row"><kbd>Tab</kbd>        <span class="shortcut-desc">Indent (sub-bullet)</span></div>
+    <div class="shortcut-row"><kbd>Shift+Tab</kbd>  <span class="shortcut-desc">Outdent</span></div>
+    <div class="shortcut-row"><kbd>* / _ / ` / [</kbd> <span class="shortcut-desc">Wrap selection</span></div>
     <div style="margin-top:20px;text-align:right">
       <button class="tbtn btn-gray" onclick="hideShortcuts()">Close</button>
     </div>
@@ -6469,6 +6479,98 @@ function appendChatMsg(role, text) {
   if (role !== 'user') renderLatexIn(bubble);
   el.scrollTop = el.scrollHeight;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Markdown editor shortcuts (both notes-editor and fnotes-editor)
+// ═══════════════════════════════════════════════════════════════════════════
+const _MD_EDITOR_IDS = new Set(['notes-editor', 'fnotes-editor']);
+
+function _mdSave(ed) {
+  if (ed.id === 'fnotes-editor') {
+    clearTimeout(_fileNotesSaveTimer);
+    _fileNotesSaveTimer = setTimeout(_saveFileNote, 600);
+  } else {
+    clearTimeout(notesSaveTimer);
+    notesSaveTimer = setTimeout(saveNotes, 1500);
+  }
+}
+
+function _wrapMd(ed, before, after) {
+  const s = ed.selectionStart, e2 = ed.selectionEnd;
+  const sel = ed.value.slice(s, e2);
+  ed.value = ed.value.slice(0, s) + before + sel + after + ed.value.slice(e2);
+  ed.selectionStart = s + before.length;
+  ed.selectionEnd   = s + before.length + sel.length;
+}
+
+// Capture phase — fires before global Ctrl+K / other handlers
+document.addEventListener('keydown', e => {
+  const ed = e.target;
+  if (!_MD_EDITOR_IDS.has(ed.id)) return;
+
+  const ctrl = e.ctrlKey || e.metaKey;
+  const s = ed.selectionStart, e2 = ed.selectionEnd;
+  const sel = ed.value.slice(s, e2);
+
+  // ── Wrap-on-selection: press *, _, `, [, ( with text selected ──
+  if (!ctrl && !e.altKey && sel) {
+    const pairs = { '*': ['*','*'], '_': ['_','_'], '`': ['`','`'], '[': ['[',']'], '(': ['(',')'], '"': ['"','"'] };
+    const p = pairs[e.key];
+    if (p) {
+      e.preventDefault();
+      _wrapMd(ed, p[0], p[1]);
+      _mdSave(ed);
+      return;
+    }
+  }
+
+  if (!ctrl) return;
+
+  // ── Ctrl+B — bold ──
+  if (e.key === 'b') {
+    e.preventDefault(); e.stopImmediatePropagation();
+    _wrapMd(ed, '**', '**');
+    _mdSave(ed); return;
+  }
+  // ── Ctrl+I — italic ──
+  if (e.key === 'i') {
+    e.preventDefault(); e.stopImmediatePropagation();
+    _wrapMd(ed, '*', '*');
+    _mdSave(ed); return;
+  }
+  // ── Ctrl+K — insert / wrap link (overrides global command palette when in editor) ──
+  if (e.key === 'k') {
+    e.preventDefault(); e.stopImmediatePropagation();
+    if (sel) {
+      ed.value = ed.value.slice(0, s) + '[' + sel + '](url)' + ed.value.slice(e2);
+      ed.selectionStart = s + 1 + sel.length + 2;
+      ed.selectionEnd   = s + 1 + sel.length + 5; // select "url"
+    } else {
+      ed.value = ed.value.slice(0, s) + '[](url)' + ed.value.slice(e2);
+      ed.selectionStart = ed.selectionEnd = s + 1; // cursor inside [ ]
+    }
+    _mdSave(ed); return;
+  }
+  // ── Ctrl+` — inline code ──
+  if (e.key === '`') {
+    e.preventDefault(); e.stopImmediatePropagation();
+    _wrapMd(ed, '`', '`');
+    _mdSave(ed); return;
+  }
+  // ── Ctrl+Shift+K — fenced code block ──
+  if (e.key === 'K') {
+    e.preventDefault(); e.stopImmediatePropagation();
+    _wrapMd(ed, '```\n', '\n```');
+    _mdSave(ed); return;
+  }
+  // ── Ctrl+Shift+X — strikethrough ──
+  if (e.key === 'X') {
+    e.preventDefault(); e.stopImmediatePropagation();
+    _wrapMd(ed, '~~', '~~');
+    _mdSave(ed); return;
+  }
+
+}, true); // capture phase
 
 // Tab / Shift+Tab indent in course notes-editor
 document.addEventListener('keydown', e => {
