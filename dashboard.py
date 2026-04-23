@@ -895,6 +895,9 @@ def api_background_enable():
         _PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
         _PLIST_PATH.write_text(_plist_content(), encoding="utf-8")
         subprocess.run(["launchctl", "load", str(_PLIST_PATH)], check=False)
+        # Detach from terminal so closing the terminal window doesn't kill us
+        import signal as _signal
+        _signal.signal(_signal.SIGHUP, _signal.SIG_IGN)
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
@@ -5900,7 +5903,7 @@ document.addEventListener('keydown', e => {
 async function loadNotes() {
   const data = await fetch(`/api/notes/${enc(activeCourse)}`).then(r => r.json());
   const editor = document.getElementById('notes-editor');
-  editor.value = data.text || '';
+  editor.value = data.text || '# Questions\n\n- [ ] \n\n# Notes\n\n- ';
   document.getElementById('notes-saved').style.display = 'none';
   // Reset preview mode
   if (notesPreviewMode) toggleNotesPreview();
@@ -5983,7 +5986,7 @@ function toggleFileNotes() {
   if (btn) btn.style.color = _fileNotesOpen ? 'var(--blue)' : 'var(--text3)';
 }
 
-const FNOTES_DEFAULT = '## Questions\n\n- [ ] \n\n## Notes\n\n';
+const FNOTES_DEFAULT = '# Questions\n\n- [ ] \n\n# Notes\n\n- ';
 
 // Called whenever a new file is selected in the preview
 async function _loadFileNote(filename) {
