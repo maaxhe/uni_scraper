@@ -912,8 +912,12 @@ def api_background_disable():
 @app.route("/api/shutdown", methods=["POST"])
 def api_shutdown():
     def _kill():
-        import time
+        import time, subprocess, pathlib
         time.sleep(0.3)
+        # Unload launchd service first so KeepAlive doesn't restart us
+        plist = pathlib.Path.home() / "Library/LaunchAgents/com.studip.dashboard.plist"
+        if plist.exists():
+            subprocess.run(["launchctl", "unload", str(plist)], capture_output=True)
         os.kill(os.getpid(), 9)
     import threading
     threading.Thread(target=_kill, daemon=True).start()
