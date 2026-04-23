@@ -2148,9 +2148,11 @@ body {
 #fnotes-rendered code { background: var(--bg3); padding: 1px 5px; border-radius: 3px; font-size: 11.5px; }
 #fnotes-rendered pre { background: var(--bg3); padding: 10px; border-radius: var(--radius); overflow-x: auto; margin: 8px 0; }
 #fnotes-rendered pre code { background: none; padding: 0; }
-/* Task list checkboxes */
-#fnotes-rendered ul { list-style: none; padding-left: 2px; }
-#fnotes-rendered li { display: flex; align-items: flex-start; gap: 7px; padding: 2px 0; }
+/* Task list checkboxes — only strip bullet from task-list items, not all lists */
+#fnotes-rendered ul { padding-left: 18px; margin: 4px 0 8px; }
+#fnotes-rendered li { margin: 3px 0; }
+#fnotes-rendered li.task-list-item { display: flex; align-items: flex-start; gap: 7px; padding: 2px 0; }
+#fnotes-rendered li.task-list-item::marker { content: ''; }
 #fnotes-rendered li input.task-list-item-checkbox {
   appearance: none; -webkit-appearance: none;
   width: 14px; height: 14px; border: 1.5px solid var(--text3);
@@ -5979,6 +5981,26 @@ document.addEventListener('DOMContentLoaded', () => {
     clearTimeout(_fileNotesSaveTimer);
     _fileNotesSaveTimer = setTimeout(_saveFileNote, 600);
   });
+  // Tab / Shift+Tab → indent / outdent by 2 spaces
+  ed.addEventListener('keydown', e => {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const start = ed.selectionStart, end = ed.selectionEnd;
+      if (e.shiftKey) {
+        const lineStart = ed.value.lastIndexOf('\n', start - 1) + 1;
+        if (ed.value.slice(lineStart, lineStart + 2) === '  ') {
+          ed.value = ed.value.slice(0, lineStart) + ed.value.slice(lineStart + 2);
+          ed.selectionStart = ed.selectionEnd = Math.max(lineStart, start - 2);
+        }
+      } else {
+        ed.value = ed.value.slice(0, start) + '  ' + ed.value.slice(end);
+        ed.selectionStart = ed.selectionEnd = start + 2;
+      }
+      clearTimeout(_fileNotesSaveTimer);
+      _fileNotesSaveTimer = setTimeout(_saveFileNote, 600);
+      return;
+    }
+  });
   // Enter on list lines → continue list; empty list line → break out
   ed.addEventListener('keydown', e => {
     if (e.key !== 'Enter') return;
@@ -6447,6 +6469,25 @@ function appendChatMsg(role, text) {
   if (role !== 'user') renderLatexIn(bubble);
   el.scrollTop = el.scrollHeight;
 }
+
+// Tab / Shift+Tab indent in course notes-editor
+document.addEventListener('keydown', e => {
+  if (e.target.id !== 'notes-editor' || e.key !== 'Tab') return;
+  e.preventDefault();
+  const ed = e.target, start = ed.selectionStart, end = ed.selectionEnd;
+  if (e.shiftKey) {
+    const lineStart = ed.value.lastIndexOf('\n', start - 1) + 1;
+    if (ed.value.slice(lineStart, lineStart + 2) === '  ') {
+      ed.value = ed.value.slice(0, lineStart) + ed.value.slice(lineStart + 2);
+      ed.selectionStart = ed.selectionEnd = Math.max(lineStart, start - 2);
+    }
+  } else {
+    ed.value = ed.value.slice(0, start) + '  ' + ed.value.slice(end);
+    ed.selectionStart = ed.selectionEnd = start + 2;
+  }
+  clearTimeout(notesSaveTimer);
+  notesSaveTimer = setTimeout(saveNotes, 3000);
+});
 
 // Auto-save notes + unsaved indicator
 document.addEventListener('input', e => {
