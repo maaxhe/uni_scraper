@@ -2624,7 +2624,31 @@ body {
   <button class="tbtn btn-gray" id="courses-overview-btn" onclick="goCoursesOverview()" title="Course overview">All courses</button>
   <button class="tbtn btn-gray topbar-shortcuts" onclick="showShortcuts()" title="Keyboard shortcuts (?)">⌨️</button>
   <button class="tbtn btn-gray" id="theme-toggle-btn" onclick="toggleTheme()" title="Toggle light/dark">🌙</button>
+  <button class="tbtn btn-gray" id="settings-btn" onclick="toggleSettingsPopover()" title="Settings">⚙</button>
   <button class="tbtn btn-blue" id="scrape-btn" onclick="runScraper()">↓<span class="tbtn-label"> Sync</span></button>
+</div>
+
+<!-- Settings popover -->
+<div id="settings-popover" style="display:none;position:fixed;top:48px;right:12px;z-index:2000;
+  background:var(--bg2);border:1px solid var(--border2);border-radius:10px;
+  padding:16px 18px;width:300px;box-shadow:0 8px 32px rgba(0,0,0,.35)">
+  <div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:14px">⚙ Settings</div>
+
+  <!-- Background toggle -->
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+    <span style="font-size:12px;color:var(--text2);flex:1">Auto-start at login</span>
+    <label class="bg-toggle">
+      <input type="checkbox" id="bg-toggle-input" onchange="bgToggle(this.checked)">
+      <span class="bg-toggle-slider"></span>
+    </label>
+  </div>
+  <div id="bg-status-line" style="font-size:11px;color:var(--text3);margin-bottom:14px"></div>
+
+  <!-- Restart instructions -->
+  <div style="border-top:1px solid var(--border);padding-top:12px">
+    <div style="font-size:11px;font-weight:600;color:var(--text3);margin-bottom:6px">HOW TO RESTART</div>
+    <div id="bg-instructions" style="font-size:11px;color:var(--text3);line-height:1.7">Loading…</div>
+  </div>
 </div>
 
 <!-- Welcome modal (shown once) -->
@@ -2726,17 +2750,6 @@ body {
           <button class="todo-add-btn" onclick="todoAddItem()">+ Add task</button>
         </div>
 
-        <!-- Background service card -->
-        <div class="bg-service-card" id="bg-service-card">
-          <div class="bg-service-header">
-            <span class="bg-service-title">🖥 Run dashboard in background (auto-start at login)</span>
-            <label class="bg-toggle" title="Toggle auto-start">
-              <input type="checkbox" id="bg-toggle-input" onchange="bgToggle(this.checked)">
-              <span class="bg-toggle-slider"></span>
-            </label>
-          </div>
-          <div class="bg-instructions" id="bg-instructions">Loading…</div>
-        </div>
       </div>
 
       <!-- Courses overview -->
@@ -3245,7 +3258,6 @@ async function boot() {
   pinRender();
   if (_todoLoad().length === 0) _todoSave([{ text: '', done: false }]);
   todoRender();
-  loadBgServiceCard();
 
   // Restore last session state
   const lastCourse = localStorage.getItem('last_course');
@@ -3898,49 +3910,52 @@ function goHome() {
   document.getElementById('course-title-bar').style.display = 'none';
   showPanel('home');
   filterAndRenderSidebar();
-  loadBgServiceCard();
 }
 
+function toggleSettingsPopover() {
+  const pop = document.getElementById('settings-popover');
+  const open = pop.style.display === 'none';
+  pop.style.display = open ? 'block' : 'none';
+  if (open) loadBgServiceCard();
+}
+document.addEventListener('click', e => {
+  const pop = document.getElementById('settings-popover');
+  if (pop && pop.style.display !== 'none' &&
+      !pop.contains(e.target) && !document.getElementById('settings-btn').contains(e.target))
+    pop.style.display = 'none';
+});
+
 async function loadBgServiceCard() {
-  const instr = document.getElementById('bg-instructions');
+  const instr  = document.getElementById('bg-instructions');
   const toggle = document.getElementById('bg-toggle-input');
+  const status = document.getElementById('bg-status-line');
   if (!instr || !toggle) return;
   let data;
   try { data = await (await fetch('/api/background-status')).json(); }
   catch { instr.textContent = 'Could not load status.'; return; }
 
   toggle.checked = data.enabled;
-  const statusDot = `<span class="bg-status-dot" style="background:${data.enabled ? 'var(--green)' : 'var(--text3)'}"></span>`;
-  const statusText = data.enabled
-    ? `${statusDot}<strong>Auto-start enabled</strong> — dashboard starts automatically at login.`
-    : `${statusDot}<strong>Auto-start disabled</strong> — dashboard only runs while this terminal session is active.`;
+  if (status) status.innerHTML = data.enabled
+    ? '<span style="color:var(--green)">●</span> Auto-start is <strong>on</strong> — starts at every login automatically.'
+    : '<span style="color:var(--text3)">●</span> Auto-start is <strong>off</strong> — only runs in the current session.';
 
   instr.innerHTML = `
-    <div style="margin-bottom:8px">${statusText}</div>
-    <div style="margin-bottom:6px"><strong>To start manually:</strong><br>
-      Open Terminal and run:<br>
-      <code onclick="navigator.clipboard.writeText(this.textContent)" title="Click to copy">${data.start_cmd}</code>
-    </div>
-    <div style="margin-bottom:6px"><strong>Then open:</strong>
-      <code onclick="navigator.clipboard.writeText('http://localhost:5001')" title="Click to copy">http://localhost:5001</code>
-    </div>
-    <div style="color:var(--text3);font-size:10px;margin-top:4px">
-      ${data.enabled
-        ? 'To stop the background service, disable the toggle above. The currently running instance will keep going until you quit it in Activity Monitor or restart your Mac.'
-        : 'Enable the toggle to auto-start the dashboard at every login — no terminal needed.'}
-    </div>`;
+    1. Open Terminal<br>
+    2. Run: <code onclick="navigator.clipboard.writeText(this.textContent);this.style.outline='1px solid var(--blue)';setTimeout(()=>this.style.outline='',800)" title="Click to copy">${data.start_cmd}</code><br>
+    3. Open: <code onclick="navigator.clipboard.writeText('http://localhost:5001');this.style.outline='1px solid var(--blue)';setTimeout(()=>this.style.outline='',800)" title="Click to copy">http://localhost:5001</code>`;
 }
 
 async function bgToggle(enabled) {
   const instr = document.getElementById('bg-instructions');
-  instr.innerHTML = '<span style="color:var(--text3)">Updating…</span>';
+  const status = document.getElementById('bg-status-line');
+  if (status) status.innerHTML = '<span style="color:var(--text3)">Updating…</span>';
   try {
     const res = await fetch(enabled ? '/api/background-enable' : '/api/background-disable', { method: 'POST' });
     const data = await res.json();
-    if (!data.ok) instr.innerHTML = `<span style="color:var(--red)">Error: ${data.error}</span>`;
+    if (!data.ok && instr) instr.innerHTML = `<span style="color:var(--red)">Error: ${data.error}</span>`;
     else loadBgServiceCard();
   } catch(e) {
-    instr.innerHTML = `<span style="color:var(--red)">Error: ${e}</span>`;
+    if (instr) instr.innerHTML = `<span style="color:var(--red)">Error: ${e}</span>`;
   }
 }
 
