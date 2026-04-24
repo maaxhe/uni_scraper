@@ -853,51 +853,26 @@ def api_save_custom_info(course_name):
     return jsonify({"success": True})
 
 # ---------------------------------------------------------------------------
-# Background service (macOS LaunchAgent)
+# Background service (macOS LaunchAgent via autostart.sh)
 # ---------------------------------------------------------------------------
-_PLIST_LABEL = "com.uniscraper.dashboard"
-_PLIST_PATH  = Path.home() / "Library" / "LaunchAgents" / f"{_PLIST_LABEL}.plist"
-_DASHBOARD_SCRIPT = str(Path(__file__).resolve())
-_DASHBOARD_DIR    = str(Path(__file__).parent.resolve())
-_DASHBOARD_LOG    = str(Path(__file__).parent / "dashboard.log")
-
-def _plist_content() -> str:
-    return f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key><string>{_PLIST_LABEL}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{PYTHON}</string>
-        <string>{_DASHBOARD_SCRIPT}</string>
-    </array>
-    <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><false/>
-    <key>WorkingDirectory</key><string>{_DASHBOARD_DIR}</string>
-    <key>StandardOutPath</key><string>{_DASHBOARD_LOG}</string>
-    <key>StandardErrorPath</key><string>{_DASHBOARD_LOG}</string>
-</dict>
-</plist>"""
+_AUTOSTART_SH = str(Path(__file__).parent / "autostart.sh")
+_PLIST_PATH   = Path.home() / "Library" / "LaunchAgents" / "com.studip.dashboard.plist"
+_DASHBOARD_DIR = str(Path(__file__).parent.resolve())
 
 @app.route("/api/background-status")
 def api_background_status():
-    enabled = _PLIST_PATH.exists()
     return jsonify({
-        "enabled": enabled,
-        "plist_path": str(_PLIST_PATH),
+        "enabled": _PLIST_PATH.exists(),
         "start_cmd": f"cd '{_DASHBOARD_DIR}' && {PYTHON} dashboard.py",
     })
 
 @app.route("/api/background-enable", methods=["POST"])
 def api_background_enable():
     try:
-        _PLIST_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _PLIST_PATH.write_text(_plist_content(), encoding="utf-8")
-        subprocess.run(["launchctl", "load", str(_PLIST_PATH)], check=False)
-        # Detach from terminal so closing the terminal window doesn't kill us
-        import signal as _signal
-        _signal.signal(_signal.SIGHUP, _signal.SIG_IGN)
+        result = subprocess.run(["bash", _AUTOSTART_SH, "install"],
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            return jsonify({"ok": False, "error": result.stderr or result.stdout})
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
@@ -905,9 +880,10 @@ def api_background_enable():
 @app.route("/api/background-disable", methods=["POST"])
 def api_background_disable():
     try:
-        if _PLIST_PATH.exists():
-            subprocess.run(["launchctl", "unload", str(_PLIST_PATH)], check=False)
-            _PLIST_PATH.unlink()
+        result = subprocess.run(["bash", _AUTOSTART_SH, "uninstall"],
+                                capture_output=True, text=True)
+        if result.returncode != 0:
+            return jsonify({"ok": False, "error": result.stderr or result.stdout})
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
@@ -915,12 +891,10 @@ def api_background_disable():
 @app.route("/api/shutdown", methods=["POST"])
 def api_shutdown():
     def _kill():
-        import time, subprocess, pathlib
+        import time
         time.sleep(0.3)
-        # Unload launchd service first so KeepAlive doesn't restart us
-        plist = pathlib.Path.home() / "Library/LaunchAgents/com.studip.dashboard.plist"
-        if plist.exists():
-            subprocess.run(["launchctl", "unload", str(plist)], capture_output=True)
+        if _PLIST_PATH.exists():
+            subprocess.run(["launchctl", "unload", str(_PLIST_PATH)], capture_output=True)
         os.kill(os.getpid(), 9)
     import threading
     threading.Thread(target=_kill, daemon=True).start()
@@ -2898,6 +2872,7 @@ body {
                 <span class="fnotes-title" id="fnotes-title">Notes</span>
                 <span id="fnotes-saved"></span>
                 <button class="fnotes-dl-btn" id="fnotes-mode-btn" title="Preview" onclick="toggleFnotesMode()">👁</button>
+                <button class="fnotes-dl-btn" title="Insert checkbox" onclick="insertCheckbox('fnotes-editor')">☐</button>
                 <button class="fnotes-dl-btn" title="Download as Markdown" onclick="downloadFileNote()">⬇</button>
                 <button class="fnotes-dl-btn" title="Close" onclick="toggleFileNotes()">✕</button>
               </div>
@@ -2937,6 +2912,8 @@ body {
             <span style="font-size:13px;font-weight:600;color:var(--text2);">Notes</span>
             <div style="flex:1"></div>
             <span id="notes-saved"></span>
+            <button class="tbtn btn-gray" onclick="insertCheckbox('notes-editor')" title="Insert checkbox">☐</button>
+            <button class="tbtn btn-blue" onclick="saveNotes()" title="Save notes">Save</button>
             <button class="tbtn btn-gray" id="notes-preview-btn" onclick="toggleNotesPreview()">Preview</button>
           </div>
           <textarea id="notes-editor" placeholder="Your notes, questions, connections… (Markdown supported)"></textarea>
@@ -5900,11 +5877,29 @@ document.addEventListener('keydown', e => {
 // ═══════════════════════════════════════════════════════════════════════════
 // Notes
 // ═══════════════════════════════════════════════════════════════════════════
+const NOTES_DEFAULT = '# Questions\n\n- [ ] \n\n# Notes\n\n- ';
+
+function _notesDraftKey(course) { return `notes_draft::${course}`; }
+function _notesDraftSet(course, text) { try { localStorage.setItem(_notesDraftKey(course), JSON.stringify({text, dirty: true})); } catch(_) {} }
+function _notesDraftClear(course) { try { localStorage.removeItem(_notesDraftKey(course)); } catch(_) {} }
+function _notesDraftGet(course) { try { const d = JSON.parse(localStorage.getItem(_notesDraftKey(course))); return d?.dirty ? d.text : null; } catch(_) { return null; } }
+
 async function loadNotes() {
+  // Flush any pending save before reloading so we don't clobber unsaved content
+  if (notesSaveTimer) { clearTimeout(notesSaveTimer); await saveNotes(); }
   const data = await fetch(`/api/notes/${enc(activeCourse)}`).then(r => r.json());
   const editor = document.getElementById('notes-editor');
-  editor.value = data.text || '# Questions\n\n- [ ] \n\n# Notes\n\n- ';
-  document.getElementById('notes-saved').style.display = 'none';
+  const draft = _notesDraftGet(activeCourse);
+  if (draft !== null) {
+    editor.value = draft;
+    const el = document.getElementById('notes-saved');
+    el.textContent = '⚠ Unsaved changes restored';
+    el.style.color = 'var(--yellow, #f59e0b)';
+    el.style.display = 'inline';
+    setTimeout(() => { el.style.display = 'none'; }, 3000);
+  } else {
+    editor.value = data.text || NOTES_DEFAULT;
+  }
   // Reset preview mode
   if (notesPreviewMode) toggleNotesPreview();
 }
@@ -5918,6 +5913,7 @@ async function saveNotes() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ text })
   });
+  _notesDraftClear(activeCourse);
   const el = document.getElementById('notes-saved');
   el.textContent = '✓ Saved';
   el.style.color = 'var(--green)';
@@ -5988,6 +5984,11 @@ function toggleFileNotes() {
 
 const FNOTES_DEFAULT = '# Questions\n\n- [ ] \n\n# Notes\n\n- ';
 
+function _fnoteDraftKey(course, file) { return `fnote_draft::${course}::${file}`; }
+function _fnoteDraftSet(course, file, text) { try { localStorage.setItem(_fnoteDraftKey(course, file), JSON.stringify({text, dirty: true})); } catch(_) {} }
+function _fnoteDraftClear(course, file) { try { localStorage.removeItem(_fnoteDraftKey(course, file)); } catch(_) {} }
+function _fnoteDraftGet(course, file) { try { const d = JSON.parse(localStorage.getItem(_fnoteDraftKey(course, file))); return d?.dirty ? d.text : null; } catch(_) { return null; } }
+
 // Called whenever a new file is selected in the preview
 async function _loadFileNote(filename) {
   if (!_fileNotesOpen) return;
@@ -5996,10 +5997,19 @@ async function _loadFileNote(filename) {
   const title  = document.getElementById('fnotes-title');
   title.textContent = filename.split('/').pop();
   editor.value = '';
-  document.getElementById('fnotes-saved').textContent = '';
+  const savedEl = document.getElementById('fnotes-saved');
+  savedEl.textContent = '';
   try {
     const data = await fetch(`/api/file-note/${enc(activeCourse)}/${enc(filename)}`).then(r => r.json());
-    editor.value = data.text || FNOTES_DEFAULT;
+    const draft = _fnoteDraftGet(activeCourse, filename);
+    if (draft !== null) {
+      editor.value = draft;
+      savedEl.textContent = '⚠ Unsaved changes restored';
+      savedEl.style.color = 'var(--yellow, #f59e0b)';
+      setTimeout(() => { if (savedEl.textContent.startsWith('⚠')) savedEl.textContent = ''; }, 3000);
+    } else {
+      editor.value = data.text || FNOTES_DEFAULT;
+    }
   } catch(_) { editor.value = FNOTES_DEFAULT; }
   if (_fnotesPreviewMode) _renderFnotes();
 }
@@ -6070,6 +6080,7 @@ async function _saveFileNote() {
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({ text }),
   });
+  _fnoteDraftClear(activeCourse, _fileNotesFile);
   const el = document.getElementById('fnotes-saved');
   el.textContent = '✓';
   el.style.color = 'var(--green)';
@@ -6085,6 +6096,7 @@ function downloadFileNote() {
 document.addEventListener('DOMContentLoaded', () => {
   const ed = document.getElementById('fnotes-editor');
   ed.addEventListener('input', () => {
+    if (activeCourse && _fileNotesFile) _fnoteDraftSet(activeCourse, _fileNotesFile, ed.value);
     clearTimeout(_fileNotesSaveTimer);
     _fileNotesSaveTimer = setTimeout(_saveFileNote, 600);
   });
@@ -6136,6 +6148,17 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 });
+
+function insertCheckbox(editorId) {
+  const ta = document.getElementById(editorId);
+  if (!ta) return;
+  const start = ta.selectionStart, end = ta.selectionEnd;
+  const insert = '- [ ] ';
+  ta.value = ta.value.slice(0, start) + insert + ta.value.slice(end);
+  ta.selectionStart = ta.selectionEnd = start + insert.length;
+  ta.focus();
+  ta.dispatchEvent(new Event('input'));
+}
 
 function toggleNotesPreview() {
   notesPreviewMode = !notesPreviewMode;
@@ -6584,9 +6607,11 @@ const _MD_EDITOR_IDS = new Set(['notes-editor', 'fnotes-editor']);
 
 function _mdSave(ed) {
   if (ed.id === 'fnotes-editor') {
+    if (activeCourse && _fileNotesFile) _fnoteDraftSet(activeCourse, _fileNotesFile, ed.value);
     clearTimeout(_fileNotesSaveTimer);
     _fileNotesSaveTimer = setTimeout(_saveFileNote, 600);
   } else {
+    if (activeCourse) _notesDraftSet(activeCourse, ed.value);
     clearTimeout(notesSaveTimer);
     notesSaveTimer = setTimeout(saveNotes, 1500);
   }
@@ -6691,6 +6716,7 @@ document.addEventListener('keydown', e => {
 // Auto-save notes + unsaved indicator
 document.addEventListener('input', e => {
   if (e.target.id === 'notes-editor') {
+    if (activeCourse) _notesDraftSet(activeCourse, e.target.value);
     const el = document.getElementById('notes-saved');
     el.textContent = '● Unsaved';
     el.style.color = 'var(--orange)';
