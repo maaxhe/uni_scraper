@@ -5910,11 +5910,12 @@ async function saveNotes() {
   notesSaveTimer = null;
   const text = document.getElementById('notes-editor').value;
   try {
-    await fetch(`/api/notes/${enc(activeCourse)}`, {
+    const res = await fetch(`/api/notes/${enc(activeCourse)}`, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ text })
     });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const el = document.getElementById('notes-saved');
     el.textContent = '✓ Saved';
     el.style.color = 'var(--green)';
