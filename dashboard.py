@@ -2873,6 +2873,7 @@ body {
                 <span id="fnotes-saved"></span>
                 <button class="fnotes-dl-btn" id="fnotes-mode-btn" title="Preview" onclick="toggleFnotesMode()">👁</button>
                 <button class="fnotes-dl-btn" title="Insert checkbox" onclick="insertCheckbox('fnotes-editor')">☐</button>
+                <button class="fnotes-dl-btn" title="Save" onclick="_saveFileNote()" style="color:var(--blue);font-weight:700">Save</button>
                 <button class="fnotes-dl-btn" title="Download as Markdown" onclick="downloadFileNote()">⬇</button>
                 <button class="fnotes-dl-btn" title="Close" onclick="toggleFileNotes()">✕</button>
               </div>
@@ -2913,7 +2914,7 @@ body {
             <div style="flex:1"></div>
             <span id="notes-saved"></span>
             <button class="tbtn btn-gray" onclick="insertCheckbox('notes-editor')" title="Insert checkbox">☐</button>
-            <button class="tbtn btn-blue" onclick="saveNotes()" title="Save notes">Save</button>
+            <button style="padding:4px 12px;border-radius:6px;border:none;cursor:pointer;font-size:12px;font-weight:600;background:var(--blue);color:#fff" onclick="saveNotes()" title="Save notes">Save</button>
             <button class="tbtn btn-gray" id="notes-preview-btn" onclick="toggleNotesPreview()">Preview</button>
           </div>
           <textarea id="notes-editor" placeholder="Your notes, questions, connections… (Markdown supported)"></textarea>
@@ -5885,7 +5886,7 @@ function _notesDraftClear(course) { try { localStorage.removeItem(_notesDraftKey
 function _notesDraftGet(course) { try { const d = JSON.parse(localStorage.getItem(_notesDraftKey(course))); return d?.dirty ? d.text : null; } catch(_) { return null; } }
 
 async function loadNotes() {
-  // Flush any pending save before reloading so we don't clobber unsaved content
+  if (!activeCourse) return;
   if (notesSaveTimer) { clearTimeout(notesSaveTimer); await saveNotes(); }
   const data = await fetch(`/api/notes/${enc(activeCourse)}`).then(r => r.json());
   const editor = document.getElementById('notes-editor');
@@ -5899,8 +5900,8 @@ async function loadNotes() {
     setTimeout(() => { el.style.display = 'none'; }, 3000);
   } else {
     editor.value = data.text || NOTES_DEFAULT;
+    document.getElementById('notes-saved').style.display = 'none';
   }
-  // Reset preview mode
   if (notesPreviewMode) toggleNotesPreview();
 }
 
@@ -5908,18 +5909,22 @@ async function saveNotes() {
   if (!activeCourse) return;
   notesSaveTimer = null;
   const text = document.getElementById('notes-editor').value;
-  await fetch(`/api/notes/${enc(activeCourse)}`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({ text })
-  });
-  _notesDraftClear(activeCourse);
-  const el = document.getElementById('notes-saved');
-  el.textContent = '✓ Saved';
-  el.style.color = 'var(--green)';
-  el.style.display = 'inline';
-  setTimeout(() => { el.style.display = 'none'; }, 2000);
-  allCourses = allCourses.map(c => c.path === activeCourse ? {...c, has_notes: true} : c);
+  try {
+    await fetch(`/api/notes/${enc(activeCourse)}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ text })
+    });
+    const el = document.getElementById('notes-saved');
+    el.textContent = '✓ Saved';
+    el.style.color = 'var(--green)';
+    el.style.display = 'inline';
+    setTimeout(() => { el.style.display = 'none'; }, 2000);
+    _notesDraftClear(activeCourse);
+    allCourses = allCourses.map(c => c.path === activeCourse ? {...c, has_notes: true} : c);
+  } catch(e) {
+    toast('Save failed: ' + e.message, 'err');
+  }
 }
 
 // Flush any pending saves immediately — call before navigating away
@@ -5934,15 +5939,16 @@ window.addEventListener('beforeunload', () => {
     const text = document.getElementById('notes-editor')?.value ?? '';
     navigator.sendBeacon(`/api/notes/${enc(activeCourse)}`,
       new Blob([JSON.stringify({text})], {type:'application/json'}));
+    notesSaveTimer = null;
   }
   if (_fileNotesSaveTimer && activeCourse && _fileNotesFile) {
     const text = document.getElementById('fnotes-editor')?.value ?? '';
     navigator.sendBeacon(`/api/file-note/${enc(activeCourse)}/${enc(_fileNotesFile)}`,
       new Blob([JSON.stringify({text})], {type:'application/json'}));
+    _fileNotesSaveTimer = null;
   }
 });
 
-// Save when tab loses visibility (switching apps, minimising, etc.)
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) _flushPendingSaves();
 });
@@ -6713,14 +6719,12 @@ document.addEventListener('keydown', e => {
   notesSaveTimer = setTimeout(saveNotes, 1000);
 });
 
-// Auto-save notes + unsaved indicator
+// Auto-save notes on input (debounced)
 document.addEventListener('input', e => {
   if (e.target.id === 'notes-editor') {
-    if (activeCourse) _notesDraftSet(activeCourse, e.target.value);
     const el = document.getElementById('notes-saved');
-    el.textContent = '● Unsaved';
-    el.style.color = 'var(--orange)';
-    el.style.display = 'inline';
+    el.textContent = '● Unsaved'; el.style.color = 'var(--orange)'; el.style.display = 'inline';
+    if (activeCourse) _notesDraftSet(activeCourse, e.target.value);
     clearTimeout(notesSaveTimer);
     notesSaveTimer = setTimeout(saveNotes, 1000);
   }
